@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**"]
 
 permissions:
   contents: read
@@ -32,7 +34,8 @@ jobs:
 
   # Full DRA path on a GPU-less kind cluster: publish → CEL allocation →
   # kubelet plugin prepare (CDI) → pod Running, via the cpu0 fallback device.
-  # hack/scenarios.sh skips its GPU-specific assertions when no gpu0 exists.
+  # SINGLE node to keep per-push CI light — the 3-node multi-node suite runs
+  # nightly / on dispatch / on release tags (e2e-multinode.yml).
   e2e:
     needs: test
     runs-on: ubuntu-latest
@@ -50,12 +53,11 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:e2e
           cache-from: type=gha
-      - name: Create kind cluster (K8s ≥ 1.34 for DRA GA; 3 nodes)
+      - name: Create kind cluster (K8s ≥ 1.34 for DRA GA)
         uses: helm/kind-action@v1
         with:
           node_image: kindest/node:v1.35.0
           cluster_name: e2e
-          config: hack/kind-multinode.yaml
       - name: Load image
         run: kind load docker-image ${{ env.IMAGE }}:e2e --name e2e
       - name: Deploy (via the Helm chart — keeps the chart continuously tested)
