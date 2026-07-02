@@ -20,6 +20,7 @@ import (
 
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
+	"github.com/sympozium-ai/llmfit-dra/internal/nodeplugin"
 	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 	"github.com/sympozium-ai/llmfit-dra/internal/publisher"
 )
@@ -32,17 +33,19 @@ func main() {
 		procRoot   = flag.String("proc-root", envOr("LLMFIT_PROC_ROOT", "/proc"), "procfs root")
 		llmfitBin  = flag.String("llmfit-bin", envOr("LLMFIT_BIN", "llmfit"), "llmfit binary for capability assessment; empty disables")
 		interval   = flag.Duration("probe-interval", 60*time.Second, "re-probe cadence; slices update only when inventory changes")
+		nodePlugin = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
+		cdiDir     = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval); err != nil {
+	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
 }
 
-func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration) error {
+func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
 	}
@@ -66,7 +69,8 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 	defer stop()
 
 	prober := probe.New(sysRoot, procRoot)
-	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName)
+	inv := nodeplugin.NewInventory()
+	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName, inv)
 	if err != nil {
 		return err
 	}
@@ -77,6 +81,15 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 		return fmt.Errorf("starting resourceslice controller: %w", err)
 	}
 	defer controller.Stop()
+
+	if nodePlugin {
+		helper, err := nodeplugin.Start(ctx, client, nodeName, inv, cdiDir)
+		if err != nil {
+			return fmt.Errorf("starting kubelet plugin: %w", err)
+		}
+		defer helper.Stop()
+		klog.InfoS("kubelet DRA plugin registered", "cdiDir", cdiDir)
+	}
 
 	// Periodic re-probe; Update is a no-op server-side when nothing changed
 	// because the helper diffs desired vs published state. udev/netlink
@@ -90,7 +103,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 			klog.InfoS("shutting down")
 			return nil
 		case <-ticker.C:
-			devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName)
+			devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName, inv)
 			if err != nil {
 				klog.ErrorS(err, "re-probe failed; keeping previous inventory")
 				continue
@@ -109,11 +122,14 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 	}
 }
 
-func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, llmfitBin, nodeName string) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
+func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, llmfitBin, nodeName string, inv *nodeplugin.Inventory) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
 	probed, err := prober.Walk()
 	if err != nil {
 		return nil, nil, fmt.Errorf("device tree walk: %w", err)
 	}
+	// Keep the kubelet plugin's view in lockstep with what we publish:
+	// Prepare joins allocation results back to /dev nodes via this snapshot.
+	inv.Set(probed)
 	ram, err := prober.MemTotalBytes()
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading system RAM: %w", err)

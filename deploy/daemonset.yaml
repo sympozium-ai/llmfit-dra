@@ -15,13 +15,15 @@ spec:
         app.kubernetes.io/name: llmfit-dra
     spec:
       serviceAccountName: llmfit-dra
+      imagePullSecrets:
+        - name: ghcr-pull
       # Stage two: full host access. llmfit assesses the node exactly as it
       # would when run natively — real /sys, real /dev, host PID namespace.
       hostPID: true
       containers:
         - name: llmfit-dra
-          image: ghcr.io/sympozium-ai/llmfit-dra:dev
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/sympozium-ai/llmfit-dra:main
+          imagePullPolicy: Always
           args:
             - --probe-interval=30s
             - --v=2
@@ -38,6 +40,14 @@ spec:
               readOnly: true
             - name: dev
               mountPath: /dev
+            # Kubelet plugin wiring: service socket dir, registration socket
+            # dir, and the dynamic CDI spec dir the runtime watches.
+            - name: plugins
+              mountPath: /var/lib/kubelet/plugins
+            - name: plugins-registry
+              mountPath: /var/lib/kubelet/plugins_registry
+            - name: cdi
+              mountPath: /var/run/cdi
           resources:
             requests:
               cpu: 10m
@@ -51,3 +61,15 @@ spec:
         - name: dev
           hostPath:
             path: /dev
+        - name: plugins
+          hostPath:
+            path: /var/lib/kubelet/plugins
+            type: Directory
+        - name: plugins-registry
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: cdi
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
