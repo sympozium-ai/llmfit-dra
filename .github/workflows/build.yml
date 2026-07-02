@@ -58,7 +58,7 @@ jobs:
         run: kind load docker-image ${{ env.IMAGE }}:e2e --name e2e
       - name: Deploy
         run: |
-          kubectl apply -f deploy/rbac.yaml -f deploy/deviceclass.yaml -f deploy/daemonset.yaml
+          kubectl apply -f deploy/rbac.yaml -f deploy/admission.yaml -f deploy/deviceclass.yaml -f deploy/daemonset.yaml
           kubectl -n llmfit-dra patch daemonset llmfit-dra --type=json -p='[
             {"op":"replace","path":"/spec/template/spec/containers/0/image","value":"${{ env.IMAGE }}:e2e"},
             {"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"},

@@ -95,6 +95,21 @@ spec:
 EOF
 }
 
+# --- Cleanup: every function is defined UNCONDITIONALLY (scenarios that
+# SKIP still leave the EXIT trap valid) and idempotent (--ignore-not-found),
+# so one trap covers every path including early fail().
+cleanup()   { kubectl delete --ignore-not-found pod/llmfit-consumer resourceclaim/llmfit-test-claim >/dev/null 2>&1 || true; }
+cleanup6()  { kubectl delete --ignore-not-found pod/llmfit-cpu-consumer resourceclaim/llmfit-cpu-claim >/dev/null 2>&1 || true; }
+cleanup7()  { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-lifecycle >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-lifecycle-claim >/dev/null 2>&1; }
+cleanup8()  { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-survivor pod/llmfit-post-restart >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-survivor-claim resourceclaim/llmfit-post-restart-claim >/dev/null 2>&1; }
+cleanup9()  { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-claim-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/qwen-qwen2-5-7b-fit >/dev/null 2>&1; }
+cleanup10() { kubectl delete --ignore-not-found --grace-period=1 deployment/llmfit-deploy-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaimtemplate/qwen-fit-tmpl >/dev/null 2>&1; }
+cleanup11() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-aligned-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-aligned-claim >/dev/null 2>&1; }
+cleanup13() { kubectl delete --ignore-not-found resourceslice/fake-vendor-slice pod/llmfit-coexist-consumer resourceclaim/llmfit-coexist-claim >/dev/null 2>&1; }
+cleanup15() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-compute >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-compute-claim >/dev/null 2>&1; }
+cleanup_host() { kubectl -n kube-system delete pod scenario-host --ignore-not-found --grace-period=1 >/dev/null 2>&1; }
+trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup13; cleanup15; cleanup_host' EXIT
+
 echo "== Scenario 1: publish"
 kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=120s >/dev/null
 nodes_total=$(kubectl get nodes --no-headers | wc -l)
@@ -175,8 +190,6 @@ for class in llmfit.ai gpu.llmfit.ai npu.llmfit.ai cpu.llmfit.ai; do
   kubectl get deviceclass "$class" >/dev/null 2>&1 || fail "shipped DeviceClass '$class' missing (run 'make deploy')"
 done
 pass "shipped DeviceClasses present"
-cleanup() { kubectl delete --ignore-not-found pod/llmfit-consumer resourceclaim/llmfit-test-claim >/dev/null 2>&1 || true; }
-trap cleanup EXIT
 cleanup
 if [ "$HAS_GPU" = 1 ]; then
   CLASS=gpu.llmfit.ai WANT=$GPU_DEV
@@ -266,8 +279,6 @@ echo "== Scenario 6: cpu0 claim is env-only (runs anywhere, no accelerator neede
 # cpu0 is exclusive; in CPU-only mode scenario 4's consumer holds it.
 cleanup
 kubectl wait --for=delete pod/llmfit-consumer --timeout=60s >/dev/null 2>&1 || true
-cleanup6() { kubectl delete --ignore-not-found pod/llmfit-cpu-consumer resourceclaim/llmfit-cpu-claim >/dev/null 2>&1 || true; }
-trap 'cleanup; cleanup6' EXIT
 cleanup6
 kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: resource.k8s.io/v1
@@ -311,8 +322,6 @@ echo "== Scenario 7: unprepare removes CDI state when the pod goes away"
 # be re-claimed below.
 cleanup; cleanup6
 kubectl wait --for=delete pod/llmfit-consumer pod/llmfit-cpu-consumer --timeout=60s >/dev/null 2>&1 || true
-cleanup7() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-lifecycle >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-lifecycle-claim >/dev/null 2>&1; }
-trap 'cleanup; cleanup6; cleanup7' EXIT
 apply_consumer llmfit-lifecycle llmfit-lifecycle-claim cpu.llmfit.ai
 kubectl wait --for=condition=Ready pod/llmfit-lifecycle --timeout=120s >/dev/null || fail "lifecycle pod not Running"
 uid=$(kubectl get resourceclaim llmfit-lifecycle-claim -o jsonpath='{.metadata.uid}')
@@ -329,8 +338,6 @@ kubectl delete resourceclaim llmfit-lifecycle-claim >/dev/null
 pass "CDI spec existed while Running, removed on unprepare"
 
 echo "== Scenario 8: driver restart is seamless (running pods survive, prepare/unprepare still work)"
-cleanup8() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-survivor pod/llmfit-post-restart >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-survivor-claim resourceclaim/llmfit-post-restart-claim >/dev/null 2>&1; }
-trap 'cleanup; cleanup6; cleanup7; cleanup8' EXIT
 apply_consumer llmfit-survivor llmfit-survivor-claim cpu.llmfit.ai
 kubectl wait --for=condition=Ready pod/llmfit-survivor --timeout=120s >/dev/null || fail "survivor pod not Running before restart"
 survivor_uid=$(kubectl get resourceclaim llmfit-survivor-claim -o jsonpath='{.metadata.uid}')
@@ -363,8 +370,6 @@ echo "== Scenario 9: llmfit claim generates a working ResourceClaim"
 # The generator inlines model-DB constants into fit CEL; the bandwidth floor
 # only ever matches accelerator devices, so this needs a GPU.
 if [ "$HAS_GPU" = 1 ]; then
-  cleanup9() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-claim-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/qwen-qwen2-5-7b-fit >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9' EXIT
   cleanup9
   claim_yaml=$(driver_exec llmfit claim Qwen/Qwen2.5-7B --min-tps 20)
   # Optional lookups must be guarded (missing attr = non-match, not error).
@@ -406,8 +411,6 @@ if [ "$HAS_GPU" = 1 ]; then
   # gpu0 is exclusive — release scenario 9's consumer first.
   cleanup9
   kubectl wait --for=delete pod/llmfit-claim-consumer --timeout=60s >/dev/null 2>&1 || true
-  cleanup10() { kubectl delete --ignore-not-found --grace-period=1 deployment/llmfit-deploy-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaimtemplate/qwen-fit-tmpl >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10' EXIT
   cleanup10
   driver_exec llmfit claim Qwen/Qwen2.5-7B --min-tps 20 --template --name qwen-fit-tmpl | kubectl apply -f - >/dev/null \
     || fail "llmfit claim --template output did not apply cleanly"
@@ -462,8 +465,6 @@ echo "== Scenario 11: matchAttribute alignment via resource.kubernetes.io/pcieRo
 HAS_NPU=0
 [ -n "${NPU_DEV:-}" ] && HAS_NPU=1
 if [ "$HAS_GPU" = 1 ] && [ "$HAS_NPU" = 1 ]; then
-  cleanup11() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-aligned-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-aligned-claim >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11' EXIT
   cleanup11
   kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: resource.k8s.io/v1
@@ -519,8 +520,6 @@ fi
 echo "== Scenario 12: uevent-triggered re-probe (hot-attach path)"
 # The production driver runs unprivileged (no hostPID), so host-namespace
 # operations use a throwaway privileged pod instead of the driver.
-cleanup_host() { kubectl -n kube-system delete pod scenario-host --ignore-not-found --grace-period=1 >/dev/null 2>&1; }
-trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host' EXIT
 cleanup_host
 kubectl -n kube-system run scenario-host --restart=Never --image=docker.io/library/busybox:1.36 \
   --overrides='{"spec":{"nodeName":"'"$node"'","hostPID":true,"containers":[{"name":"scenario-host","image":"docker.io/library/busybox:1.36","command":["sleep","600"],"securityContext":{"privileged":true}}]}}' >/dev/null
@@ -547,8 +546,6 @@ fi
 
 echo "== Scenario 13: vendor coexistence — a vendor driver's presence demotes our GPUs"
 if [ "$HAS_GPU" = 1 ]; then
-  cleanup13() { kubectl delete --ignore-not-found resourceslice/fake-vendor-slice pod/llmfit-coexist-consumer resourceclaim/llmfit-coexist-claim >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host; cleanup13' EXIT
   cleanup13
   node=$(our_slice | jq -r '.[0].spec.nodeName')
   kubectl apply -f - <<EOF >/dev/null
@@ -624,8 +621,6 @@ echo "== Scenario 15: real compute on the claimed device (not just env vars)"
 # The strongest assertion in the suite: a claimed pod opens the injected
 # render node through a real userspace driver (Mesa RADV/ANV via Vulkan).
 if [ "$HAS_GPU" = 1 ]; then
-  cleanup15() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-compute >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-compute-claim >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host; cleanup13; cleanup15' EXIT
   cleanup15
   kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: resource.k8s.io/v1
