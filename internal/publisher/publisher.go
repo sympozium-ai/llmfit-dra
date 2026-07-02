@@ -195,6 +195,15 @@ func vendorName(pciVendor string) string {
 		return "amd"
 	case "1da3":
 		return "habana"
+	// Virtual display adapters (hypervisor framebuffers). Published as
+	// facts like everything else — they carry no bandwidth attribute, so
+	// fit CEL never selects them.
+	case "1414":
+		return "microsoft"
+	case "15ad":
+		return "vmware"
+	case "1af4":
+		return "virtio"
 	default:
 		return "pci-" + pciVendor
 	}

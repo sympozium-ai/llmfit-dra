@@ -98,10 +98,12 @@ echo "$devices" | jq -e '.[] | select(.name == "cpu0")' >/dev/null || fail "cpu0
 cpu_mem=$(echo "$devices" | jq -r '.[] | select(.name == "cpu0") | .capacity.memory.value // .capacity.memory')
 [ -n "$cpu_mem" ] && [ "$cpu_mem" != "null" ] || fail "cpu0 has no memory capacity"
 
-# GPU assertions run only where a GPU exists — the same suite must pass on
-# a GPU-less CI kind cluster via the cpu0 fallback device.
+# GPU assertions run only where a FIT-CAPABLE gpu exists (one the index or
+# llmfit priced — virtual display adapters on CI runners publish as gpu0
+# with no bandwidth and must not count). The same suite must pass on such
+# nodes via the cpu0 fallback device.
 HAS_GPU=0
-if echo "$devices" | jq -e '.[] | select(.name == "gpu0")' >/dev/null; then
+if echo "$devices" | jq -e '.[] | select(.name == "gpu0") | .attributes.memoryBandwidthGBs.int > 0' >/dev/null 2>&1; then
   HAS_GPU=1
   gpu0=$(echo "$devices" | jq '.[] | select(.name == "gpu0")')
   vendor=$(echo "$gpu0" | jq -r '.attributes.vendor.string')
@@ -114,7 +116,7 @@ if echo "$devices" | jq -e '.[] | select(.name == "gpu0")' >/dev/null; then
   [ -n "$mem" ] && [ "$mem" != "null" ] || fail "gpu0 has no memory capacity"
   pass "gpu0: $vendor '$model', indexed, bandwidth=${bw}GB/s, memory=${mem}"
 else
-  echo "  SKIP: no gpu0 on this node — running in CPU-only mode"
+  echo "  SKIP: no fit-capable gpu0 on this node — running in CPU-only mode"
   pass "cpu0 present with memory capacity ${cpu_mem}"
 fi
 
