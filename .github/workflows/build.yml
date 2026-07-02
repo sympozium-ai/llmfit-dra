@@ -25,8 +25,8 @@ jobs:
           go-version-file: go.mod
       - name: Vet
         run: go vet ./...
-      - name: Unit tests
-        run: go test ./...
+      - name: Unit tests (race detector on)
+        run: go test -race ./...
 
   # Full DRA path on a GPU-less kind cluster: publish → CEL allocation →
   # kubelet plugin prepare (CDI) → pod Running, via the cpu0 fallback device.
@@ -48,11 +48,12 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:e2e
           cache-from: type=gha
-      - name: Create kind cluster (K8s ≥ 1.34 for DRA GA)
+      - name: Create kind cluster (K8s ≥ 1.34 for DRA GA; 3 nodes)
         uses: helm/kind-action@v1
         with:
           node_image: kindest/node:v1.35.0
           cluster_name: e2e
+          config: hack/kind-multinode.yaml
       - name: Load image
         run: kind load docker-image ${{ env.IMAGE }}:e2e --name e2e
       - name: Deploy

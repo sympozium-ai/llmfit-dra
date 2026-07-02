@@ -1,0 +1,10 @@
+# CI cluster shape: one control plane + two workers, so the e2e suite
+# exercises multi-node realities (one slice per node from three driver
+# pods, cross-node claim scheduling, node-targeted prepare-state checks)
+# instead of being structurally single-node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

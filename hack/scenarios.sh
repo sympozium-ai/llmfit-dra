@@ -44,8 +44,16 @@ fail() { echo "  FAIL: $1" >&2; exit 1; }
 slices_json() { kubectl get resourceslices -o json; }
 our_slice() { slices_json | jq --arg d "$DRIVER" '[.items[] | select(.spec.driver == $d)]'; }
 
-# Exec inside the (Running) driver pod — it mounts host /var/run/cdi, so it
-# can observe the kubelet plugin's on-disk prepare state.
+# Exec inside a (Running) driver pod — it mounts host /var/run/cdi, so it
+# can observe the kubelet plugin's on-disk prepare state. driver_exec_on
+# targets the pod on a SPECIFIC node: on multi-node clusters, prepare state
+# lives only on the node where the consumer landed.
+driver_exec_on() {
+  local target=$1 pod
+  shift
+  pod=$(kubectl -n "$NS" get pod --field-selector="spec.nodeName=$target,status.phase=Running" -o name | head -1)
+  kubectl -n "$NS" exec "${pod#pod/}" -- "$@"
+}
 driver_exec() {
   local pod
   pod=$(kubectl -n "$NS" get pod --field-selector=status.phase=Running -o name | head -1)
@@ -89,15 +97,18 @@ EOF
 
 echo "== Scenario 1: publish"
 kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=120s >/dev/null
+nodes_total=$(kubectl get nodes --no-headers | wc -l)
 for i in $(seq 1 30); do
   count=$(our_slice | jq 'length')
-  [ "$count" -ge 1 ] && break
+  [ "$count" -ge "$nodes_total" ] && break
   sleep 2
 done
-[ "$count" -ge 1 ] || fail "no ResourceSlice published by $DRIVER"
+# Multi-node honesty: EVERY node must publish, not just one.
+[ "$count" -ge "$nodes_total" ] || fail "only $count/$nodes_total nodes published a ResourceSlice"
+slice_nodes=$(our_slice | jq -r '[.[].spec.nodeName] | unique | length')
+[ "$slice_nodes" = "$nodes_total" ] || fail "slices cover $slice_nodes/$nodes_total nodes"
 node=$(our_slice | jq -r '.[0].spec.nodeName')
-[ -n "$node" ] && [ "$node" != "null" ] || fail "slice has no spec.nodeName"
-pass "slice published for node '$node' (count=$count)"
+pass "slices published for all $nodes_total node(s)"
 
 echo "== Scenario 2: device shape"
 devices=$(our_slice | jq '.[0].spec.devices')
@@ -142,12 +153,15 @@ echo "== Scenario 3: reconcile after delete"
 # can mask the delete on the first sync (30s SyncDelay), so worst case is
 # roughly TTL + 2×SyncDelay ≈ 2 minutes. Allow 150s.
 slice_name=$(our_slice | jq -r '.[0].metadata.name')
+slice_node=$(our_slice | jq -r '.[0].spec.nodeName')
 kubectl delete resourceslice "$slice_name" >/dev/null
 recreated=""
 for i in $(seq 1 75); do
-  new_count=$(our_slice | jq 'length')
-  new_name=$(our_slice | jq -r '.[0].metadata.name // empty')
-  if [ "$new_count" -ge 1 ] && [ "$new_name" != "$slice_name" ]; then recreated="$new_name"; break; fi
+  # Multi-node: the recreated slice must be for the SAME node — another
+  # node's untouched slice must not satisfy this.
+  recreated=$(our_slice | jq -r --arg n "$slice_node" --arg old "$slice_name" \
+    'first(.[] | select(.spec.nodeName == $n and .metadata.name != $old)) | .metadata.name // empty')
+  [ -n "$recreated" ] && break
   sleep 2
 done
 [ -n "$recreated" ] || fail "slice not recreated within 150s of deletion"
@@ -302,11 +316,12 @@ trap 'cleanup; cleanup6; cleanup7' EXIT
 apply_consumer llmfit-lifecycle llmfit-lifecycle-claim cpu.llmfit.ai
 kubectl wait --for=condition=Ready pod/llmfit-lifecycle --timeout=120s >/dev/null || fail "lifecycle pod not Running"
 uid=$(kubectl get resourceclaim llmfit-lifecycle-claim -o jsonpath='{.metadata.uid}')
-driver_exec test -f "/var/run/cdi/llmfit.ai-$uid.json" || fail "CDI spec for claim $uid missing while pod is Running"
+lnode=$(kubectl get pod llmfit-lifecycle -o jsonpath='{.spec.nodeName}')
+driver_exec_on "$lnode" test -f "/var/run/cdi/llmfit.ai-$uid.json" || fail "CDI spec for claim $uid missing while pod is Running"
 kubectl delete pod llmfit-lifecycle --grace-period=1 --wait >/dev/null
 gone=""
 for i in $(seq 1 30); do
-  if ! driver_exec test -e "/var/run/cdi/llmfit.ai-$uid.json" 2>/dev/null; then gone=1; break; fi
+  if ! driver_exec_on "$lnode" test -e "/var/run/cdi/llmfit.ai-$uid.json" 2>/dev/null; then gone=1; break; fi
   sleep 2
 done
 [ -n "$gone" ] || fail "CDI spec llmfit.ai-$uid.json still on the node after pod deletion (unprepare not called or failed)"
@@ -319,6 +334,7 @@ trap 'cleanup; cleanup6; cleanup7; cleanup8' EXIT
 apply_consumer llmfit-survivor llmfit-survivor-claim cpu.llmfit.ai
 kubectl wait --for=condition=Ready pod/llmfit-survivor --timeout=120s >/dev/null || fail "survivor pod not Running before restart"
 survivor_uid=$(kubectl get resourceclaim llmfit-survivor-claim -o jsonpath='{.metadata.uid}')
+snode=$(kubectl get pod llmfit-survivor -o jsonpath='{.spec.nodeName}')
 
 kubectl -n "$NS" rollout restart daemonset/llmfit-dra >/dev/null
 kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=120s >/dev/null || fail "driver did not come back after restart"
@@ -331,7 +347,7 @@ phase=$(kubectl get pod llmfit-survivor -o jsonpath='{.status.phase}')
 kubectl delete pod llmfit-survivor --grace-period=1 --wait >/dev/null
 gone=""
 for i in $(seq 1 30); do
-  if ! driver_exec test -e "/var/run/cdi/llmfit.ai-$survivor_uid.json" 2>/dev/null; then gone=1; break; fi
+  if ! driver_exec_on "$snode" test -e "/var/run/cdi/llmfit.ai-$survivor_uid.json" 2>/dev/null; then gone=1; break; fi
   sleep 2
 done
 [ -n "$gone" ] || fail "pre-restart claim's CDI spec not cleaned up by the new instance"
@@ -602,6 +618,60 @@ EOF
   pass "cross-node slice forgery denied by ValidatingAdmissionPolicy"
 else
   echo "  SKIP: ValidatingAdmissionPolicy not installed (run 'make deploy')"
+fi
+
+echo "== Scenario 15: real compute on the claimed device (not just env vars)"
+# The strongest assertion in the suite: a claimed pod opens the injected
+# render node through a real userspace driver (Mesa RADV/ANV via Vulkan).
+if [ "$HAS_GPU" = 1 ]; then
+  cleanup15() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-compute >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-compute-claim >/dev/null 2>&1; }
+  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host; cleanup13; cleanup15' EXIT
+  cleanup15
+  kubectl apply -f - <<'EOF' >/dev/null
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: llmfit-compute-claim
+spec:
+  devices:
+    requests:
+      - name: dev
+        exactly:
+          deviceClassName: gpu.llmfit.ai
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-compute
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: main
+      image: docker.io/library/debian:trixie-slim
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          apt-get update -qq >/dev/null
+          apt-get install -yqq vulkan-tools mesa-vulkan-drivers >/dev/null 2>&1
+          vulkaninfo --summary
+      resources:
+        claims:
+          - name: dev
+  resourceClaims:
+    - name: dev
+      resourceClaimName: llmfit-compute-claim
+EOF
+  # Generous timeout: cold node = image pull + ~100MB Mesa install.
+  kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/llmfit-compute --timeout=600s >/dev/null \
+    || { kubectl describe pod llmfit-compute | tail -8; kubectl logs llmfit-compute 2>/dev/null | tail -8; fail "compute pod did not succeed"; }
+  gpu_line=$(kubectl logs llmfit-compute | grep -iE "deviceName" | grep -viE "llvmpipe|swiftshader" | head -1)
+  [ -n "$gpu_line" ] || fail "vulkaninfo saw no physical GPU (software rasterizer only) — device injection is not usable"
+  pass "Vulkan enumerated the claimed device:${gpu_line}"
+else
+  echo "  SKIP: needs a fit-capable GPU"
 fi
 
 echo
