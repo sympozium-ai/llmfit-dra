@@ -8,6 +8,12 @@
 # claim-time physics, not class vocabulary (Tenet 3). The kind classes
 # exist because Kueue and ResourceQuota count requests by class name,
 # making device kind a quota/admission dimension for free.
+# The base and gpu classes exclude vendorManaged devices: when a vendor DRA
+# driver owns this node's GPUs, allocating the same silicon through llmfit
+# too would double-book it. The attribute is only ever set (true) on demoted
+# devices, so an absence check suffices — and a custom class WITHOUT this
+# exclusion deliberately re-enables the fitness-companion matchAttribute
+# pattern beside the vendor driver.
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
@@ -15,7 +21,9 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: device.driver == "llmfit.ai"
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          !('vendorManaged' in device.attributes["llmfit.ai"])
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
@@ -26,7 +34,8 @@ spec:
     - cel:
         expression: >-
           device.driver == "llmfit.ai" &&
-          device.attributes["llmfit.ai"].kind == "gpu"
+          device.attributes["llmfit.ai"].kind == "gpu" &&
+          !('vendorManaged' in device.attributes["llmfit.ai"])
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass

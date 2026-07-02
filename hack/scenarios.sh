@@ -27,6 +27,9 @@
 #  12. Hotplug  — Phase 3: a synthesized kernel uevent (echo change >
 #                 …/uevent on the host) triggers an immediate re-probe
 #                 instead of waiting out the ticker.
+#  13. Coexist  — Phase 4: a (forged) vendor DRA driver slice for this node
+#                 demotes our GPUs to fitness-only (vendorManaged attr);
+#                 default classes refuse them; removal restores allocation.
 #
 set -euo pipefail
 
@@ -513,6 +516,54 @@ if driver_exec nsenter -t 1 -m -- sh -c 'ls /sys/class/drm/card*/uevent >/dev/nu
   pass "synthesized drm uevent re-probed within seconds (count $before → $after)"
 else
   echo "  SKIP: no /sys/class/drm devices on the host to synthesize a uevent from"
+fi
+
+echo "== Scenario 13: vendor coexistence — a vendor driver's presence demotes our GPUs"
+if [ "$HAS_GPU" = 1 ]; then
+  cleanup13() { kubectl delete --ignore-not-found resourceslice/fake-vendor-slice pod/llmfit-coexist-consumer resourceclaim/llmfit-coexist-claim >/dev/null 2>&1; }
+  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup13' EXIT
+  cleanup13
+  node=$(our_slice | jq -r '.[0].spec.nodeName')
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: fake-vendor-slice
+spec:
+  driver: gpu.nvidia.com
+  nodeName: $node
+  pool:
+    name: $node
+    resourceSliceCount: 1
+  devices:
+    - name: gpu-0
+EOF
+  demoted=""
+  for i in $(seq 1 30); do
+    vm=$(our_slice | jq --arg n "$GPU_DEV" -r '.[0].spec.devices[] | select(.name == $n) | .attributes.vendorManaged.bool // empty')
+    [ "$vm" = "true" ] && { demoted=1; break; }
+    sleep 2
+  done
+  [ -n "$demoted" ] || fail "GPU not marked vendorManaged within 60s of vendor slice appearing"
+  # A default-class claim must now refuse the demoted GPU (stay unallocated).
+  apply_consumer llmfit-coexist-consumer llmfit-coexist-claim gpu.llmfit.ai
+  sleep 10
+  alloc=$(kubectl get resourceclaim llmfit-coexist-claim -o jsonpath='{.status.allocation.devices.results[0].device}' 2>/dev/null || true)
+  [ -z "$alloc" ] || fail "demoted GPU was allocated through the default class ('$alloc') — double-booking hazard"
+  kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-coexist-consumer >/dev/null 2>&1
+  kubectl delete --ignore-not-found resourceclaim/llmfit-coexist-claim >/dev/null 2>&1
+  # Vendor driver leaves: demotion clears and allocation works again.
+  kubectl delete resourceslice fake-vendor-slice >/dev/null
+  restored=""
+  for i in $(seq 1 30); do
+    vm=$(our_slice | jq --arg n "$GPU_DEV" -r '.[0].spec.devices[] | select(.name == $n) | .attributes.vendorManaged.bool // empty')
+    [ -z "$vm" ] && { restored=1; break; }
+    sleep 2
+  done
+  [ -n "$restored" ] || fail "vendorManaged attribute did not clear after vendor slice removal"
+  pass "vendor presence demoted $GPU_DEV (default class refused it); removal restored it"
+else
+  echo "  SKIP: needs a fit-capable GPU"
 fi
 
 echo

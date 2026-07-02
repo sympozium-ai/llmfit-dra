@@ -31,6 +31,14 @@ type Options struct {
 	// without it silently drop the field, which the resourceslice helper
 	// reports as a DroppedFieldsError on every sync.
 	Taints bool
+
+	// VendorManagedGPUs marks every GPU with the vendorManaged attribute:
+	// a vendor DRA driver owns allocation of this node's GPUs, and the
+	// shipped DeviceClasses exclude vendorManaged devices so the same
+	// silicon is never allocatable through two drivers. Attributes stay
+	// published — the fitness/companion matchAttribute pattern remains
+	// available through a custom class that opts in.
+	VendorManagedGPUs bool
 }
 
 // BuildDevices maps probed devices into DRA device entries. Capability is
@@ -134,6 +142,9 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			}
 			if unified != nil {
 				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: unified}
+			}
+			if opts.VendorManagedGPUs && d.Kind == probe.KindGPU {
+				attrs["vendorManaged"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(true)}
 			}
 
 			// Capacity is only published when we actually know it: a probed

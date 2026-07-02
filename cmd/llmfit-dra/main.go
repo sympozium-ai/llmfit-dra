@@ -37,17 +37,18 @@ func main() {
 		nodePlugin = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
 		cdiDir     = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
 		taints     = flag.Bool("publish-taints", false, "taint unhealthy devices NoSchedule (requires the DRADeviceTaints feature gate)")
+		vendors    = flag.String("vendor-drivers", publisher.DefaultVendorDrivers, "DRA drivers that own GPU allocation; their presence on this node demotes our GPUs to fitness-only (empty disables)")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir, *taints); err != nil {
+	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir, *taints, *vendors); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
 }
 
-func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool) error {
+func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag string) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
 	}
@@ -72,7 +73,21 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 
 	prober := probe.New(sysRoot, procRoot)
 	inv := nodeplugin.NewInventory()
+	vendorDrivers := publisher.ParseVendorDrivers(vendorFlag)
 	opts := publisher.Options{Taints: taints}
+	// refreshOpts re-evaluates per-cycle facts that live outside sysfs.
+	refreshOpts := func() {
+		vm, err := publisher.VendorGPUsPresent(ctx, client, nodeName, vendorDrivers)
+		if err != nil {
+			klog.ErrorS(err, "vendor coexistence check failed; keeping previous state")
+			return
+		}
+		if vm != opts.VendorManagedGPUs {
+			klog.InfoS("vendor GPU driver presence changed; GPUs demoted to fitness-only", "vendorManaged", vm)
+		}
+		opts.VendorManagedGPUs = vm
+	}
+	refreshOpts()
 	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
 	if err != nil {
 		return err
@@ -116,6 +131,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 			klog.InfoS("uevent-triggered re-probe")
 		case <-ticker.C:
 		}
+		refreshOpts()
 		devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
 		if err != nil {
 			klog.ErrorS(err, "re-probe failed; keeping previous inventory")

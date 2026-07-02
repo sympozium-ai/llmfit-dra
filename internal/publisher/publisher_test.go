@@ -329,3 +329,33 @@ func TestMatchLLMFitGPURefusesAmbiguity(t *testing.T) {
 	assertStr(t, devices[0].Attributes, "source", "index")
 	assertStr(t, devices[0].Attributes, "model", "AMD Radeon RX 7900 XTX")
 }
+
+func TestBuildDevicesVendorManagedDemotesGPUsOnly(t *testing.T) {
+	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{VendorManagedGPUs: true})
+	for _, d := range devices {
+		_, marked := d.Attributes["vendorManaged"]
+		kind := *d.Attributes["kind"].StringValue
+		if kind == "gpu" && !marked {
+			t.Errorf("gpu %s not marked vendorManaged", d.Name)
+		}
+		if kind != "gpu" && marked {
+			t.Errorf("%s (%s) must not be vendorManaged", d.Name, kind)
+		}
+	}
+	// Default: attribute absent everywhere.
+	for _, d := range BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{}) {
+		if _, marked := d.Attributes["vendorManaged"]; marked {
+			t.Errorf("%s vendorManaged without a vendor driver present", d.Name)
+		}
+	}
+}
+
+func TestParseVendorDrivers(t *testing.T) {
+	v := ParseVendorDrivers(" gpu.nvidia.com, neuron.amazonaws.com ,")
+	if !v["gpu.nvidia.com"] || !v["neuron.amazonaws.com"] || len(v) != 2 {
+		t.Errorf("parsed %v", v)
+	}
+	if len(ParseVendorDrivers("")) != 0 {
+		t.Error("empty flag must disable coexistence")
+	}
+}
