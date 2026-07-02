@@ -37,6 +37,31 @@ pod, with zero Sympozium components:
 - **`llmfit claim`** generates the fit CEL from the model database (see
   below).
 
+**Phase 4 — scale hardening (done, minus hardware-blocked evidence).**
+An adversarial multi-agent audit (`docs/readiness-audit-2026-07-02.json`,
+34 confirmed findings) gated the jump from "working POC" to "scales across
+a heterogeneous cluster". Every software-addressable finding is closed:
+
+- **Stable identity**: devices are named by PCI address
+  (`gpu-0000-c3-00-0`) — allocations can never silently rebind to
+  different silicon after reboot/hot-remove.
+- **Honest capability**: capacity/`unifiedMemory` publish only when a
+  source *knows* them (no more "system RAM as VRAM" on unknown discrete
+  cards); Intel `i915`/`xe` VRAM probing; llmfit pairing refuses
+  same-vendor ambiguity; generated fit CEL guards optional attributes
+  (missing attribute = non-match, not error).
+- **Coexistence enforced in code**: a vendor GPU driver's slices on the
+  node demote our GPUs to fitness-only (`vendorManaged`; default classes
+  exclude them) — no double allocation, opt-in companion pattern intact.
+- **Ops/security**: unprivileged driver (`hostNetwork`+`NET_ADMIN` only),
+  tolerations + `system-node-critical`, fatal-error exit, CDI orphan GC,
+  uevent storm hardening, ValidatingAdmissionPolicy pinning slice writes
+  to the writer's own node, secrets off argv.
+- **Evidence**: CI e2e runs a 3-node kind cluster; unit tests run `-race`;
+  scenario 15 runs REAL Vulkan compute in a claimed pod (RADV enumerates
+  the injected device). Two-vendor / NVIDIA end-to-end evidence remains
+  hardware-blocked.
+
 **Phase 3 — alignment & liveness (done, minus vendor-hardware items).**
 Shipped: the standardized `resource.kubernetes.io/pcieRoot` attribute +
 `matchAttribute` alignment (scenario 11); honest health — `healthy` is
@@ -85,6 +110,7 @@ stays `cpu0`. Descriptive identity still lives in attributes.
 | `backend` | string | llmfit inference backend: `Vulkan`, `CUDA`, `ROCm`, `SYCL`, `Metal` |
 | `healthy` | bool | computed per probe cycle: kernel driver bound, no uncorrectable RAS errors |
 | `healthReason` | string | only when unhealthy: `driverUnbound` \| `uncorrectableEcc` |
+| `vendorManaged` | bool | only when a vendor DRA driver owns this node's GPUs — default classes exclude such devices |
 | capacity `memory` | quantity | VRAM, or system RAM when unified |
 
 Fit for a *specific* LLM is deliberately **not** published (models × devices
@@ -235,6 +261,10 @@ docker/kind daemon lives on another host (e.g. over tailscale).
 9. **Claim generation** — `llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -` (generator runs from the image) allocates and runs.
 10. **Deployment** — the Phase 2 exit criterion verbatim: a vanilla Deployment consuming a `llmfit claim --template`-generated ResourceClaimTemplate lands on the fit device and runs; the per-pod claim is garbage-collected on delete.
 11. **Alignment** — one claim requests gpu + npu constrained by `matchAttribute: resource.kubernetes.io/pcieRoot`; both allocate and both prepare into one pod (multi-device CDI merge, per-device `LLMFIT_DEVICE_<NAME>` env).
+12. **Hotplug** — a synthesized kernel uevent triggers an immediate re-probe (host ops run in a throwaway privileged pod; the driver itself is unprivileged).
+13. **Coexistence** — a forged vendor-driver slice demotes our GPU (`vendorManaged`); the default class refuses it; removal restores it.
+14. **Admission** — impersonating the driver SA to forge a cross-node slice is denied by the ValidatingAdmissionPolicy.
+15. **Real compute** — a claimed pod installs Mesa/Vulkan and `vulkaninfo` enumerates the injected device (software rasterizers don't count).
 
 GPU-specific assertions self-skip on nodes without a **fit-capable** `gpu0`
 (one with a bandwidth attribute — virtual display adapters on CI runners
@@ -244,7 +274,8 @@ from the probe (cpu0-only inventory), restoring the DaemonSet afterwards.
 
 ## Roadmap
 
-- **Hardware-blocked Phase 3 tails**: live cross-driver `matchAttribute` against a vendor DRA driver (needs a mixed NVIDIA/Neuron node); vendor event streams (XID/DCGM) as an additional health source.
+- **Hardware-blocked evidence** (needs attached devices): a second vendor node (Intel/NVIDIA) for a real two-vendor fleet; NVIDIA end-to-end; live cross-driver `matchAttribute`; vendor event streams (XID/DCGM) as an additional health source.
+- **Per-instance llmfit pairing**: llmfit reporting PCI identity in `system --json` would let mixed same-vendor multi-GPU nodes use llmfit capability per card (today they fall back to the index).
 - **Index as artifact**: extract `internal/index/data.json` into a versioned dataset other drivers can vendor.
 - **Image base**: optionally consume llmfit's release image (`COPY --from`) instead of compiling the submodule — faster CI, at the cost of pinning an image digest rather than a source SHA.
 
