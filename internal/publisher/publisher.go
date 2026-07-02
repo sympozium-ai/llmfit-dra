@@ -81,8 +81,14 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 				if lf.Backend != "" {
 					attrs["backend"] = resourceapi.DeviceAttribute{StringValue: ptr.To(lf.Backend)}
 				}
-				if lf.MemoryBandwidthGBps != nil && *lf.MemoryBandwidthGBps > 0 {
+				switch {
+				case lf.MemoryBandwidthGBps != nil && *lf.MemoryBandwidthGBps > 0:
 					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(int64(*lf.MemoryBandwidthGBps))}
+				case found && entry.MemoryBandwidthGBs > 0:
+					// llmfit matched the device but couldn't price its
+					// bandwidth (e.g. a stale pci.ids gave lspci a generic
+					// name). The PCI-ID index still can.
+					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.MemoryBandwidthGBs)}
 				}
 				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(lf.UnifiedMemory)}
 				// llmfit's vram_gb is the fit budget (for APUs it already

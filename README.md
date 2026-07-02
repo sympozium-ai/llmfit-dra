@@ -69,26 +69,25 @@ Two couplings, one at runtime and one at build time:
 the publisher degrades to the embedded index — the `source` attribute on every
 device tells you which path was taken.
 
-**Build.** The binary is **not a GitHub release and not crates.io** — it is
-built from local llmfit source and baked into the image:
+**Build.** llmfit is a **git submodule** at `third_party/llmfit`, pinned to an
+exact commit (currently AlexsJones/llmfit@`3bfd334` — the first commit with
+`memory_bandwidth_gbps` in the `system --json` output plus the Strix Halo
+bandwidth entries; no tagged llmfit release has these yet). The Dockerfile is
+hermetic: a `rust:1-slim-bookworm` stage compiles the submodule with
+`cargo build --release -p llmfit`, and the runtime stage
+(`debian:bookworm-slim` + pciutils) copies in both binaries. No host toolchain
+leaks into the image, so builds are reproducible from a clean
+`git clone --recurse-submodules`.
 
-1. `cargo build --release -p llmfit` in `LLMFIT_SRC` (default `~/Code/llmfit`).
-2. `make image` copies `$(LLMFIT_SRC)/target/release/llmfit` to
-   `third_party/llmfit` (gitignored) and the Dockerfile `COPY`s it in.
+To bump the pin: `cd third_party/llmfit && git fetch && git checkout <ref>`,
+commit the submodule update, and CI rebuilds against it. Once a tagged llmfit
+release includes the bandwidth field, the pin can track release tags.
 
-Local source is currently *required*: the integration depends on
-`memory_bandwidth_gbps` in the `system --json` output, which landed on llmfit
-`main` (AlexsJones/llmfit@3bfd334, with the Strix Halo bandwidth entries) and
-is not yet in any tagged release. Two consequences to be aware of:
-
-- **glibc coupling** — the binary is host-built, so the image's final base
-  (`fedora-minimal:44`) must match the build host's glibc. Building on a
-  different distro means changing the base image or building llmfit inside
-  the Dockerfile.
-- **Reproducibility** — the image embeds whatever is in your local llmfit
-  working tree. Once a tagged llmfit release includes the bandwidth field,
-  the plan is to pin a released artifact (or `ghcr.io/alexsjones/llmfit`)
-  in a Dockerfile build stage instead.
+**CI / images.** `.github/workflows/build.yml` runs vet + unit tests, then
+builds and pushes `ghcr.io/sympozium-ai/llmfit-dra` on every push to `main`
+(tags: `latest`, `main`, `sha-<short>`) and on `v*` tags (semver). PRs build
+without pushing. linux/amd64 only for now — the llmfit Rust stage under QEMU
+makes arm64 impractical; revisit with native arm64 runners.
 
 ## Layout
 
@@ -106,7 +105,7 @@ hack/scenarios.sh     live-cluster scenarios (publish / shape / reconcile / CEL-
 Requires Kubernetes ≥ 1.34 (DRA GA). Tested on kind + v1.35.
 
 ```sh
-(cd ~/Code/llmfit && cargo build --release -p llmfit)   # capability engine (see "How llmfit is consumed")
+git clone --recurse-submodules git@github.com:sympozium-ai/llmfit-dra.git
 make test                        # unit tests
 make kind-load KIND_CLUSTER=tailnet   # kind on this machine…
 make sideload                         # …or remote kind reachable only via kubectl

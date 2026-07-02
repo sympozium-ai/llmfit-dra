@@ -229,3 +229,29 @@ func TestBuildDevicesLLMFitFallbackWhenNil(t *testing.T) {
 	assertStr(t, byName["gpu2"].Attributes, "source", "probe")
 	assertStr(t, byName["cpu0"].Attributes, "source", "probe")
 }
+
+func TestBuildDevicesLLMFitBandwidthFallsBackToIndex(t *testing.T) {
+	vram := 62.56
+	sys := &llmfit.System{
+		CPUName: "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+		HasGPU:  true,
+		// Stale pci.ids scenario: lspci resolved only the vendor, so llmfit
+		// couldn't price bandwidth from the name.
+		GPUs: []llmfit.GPU{{Name: "AMD/ATI", VRAMGB: &vram, Backend: "Vulkan", Count: 1, UnifiedMemory: true}},
+	}
+	probed := []probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "1586", Driver: "amdgpu"},
+		{Kind: probe.KindCPU, Index: 0, SystemRAMBytes: systemRAM},
+	}
+	devices := BuildDevices(probed, mustIndex(t), systemRAM, sys)
+	for _, d := range devices {
+		if d.Name != "gpu0" {
+			continue
+		}
+		assertStr(t, d.Attributes, "source", "llmfit")
+		// Bandwidth rescued from the PCI-ID index (1002:1586 = Strix Halo).
+		assertInt(t, d.Attributes, "memoryBandwidthGBs", 256)
+		return
+	}
+	t.Fatal("gpu0 not built")
+}

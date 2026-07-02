@@ -1,6 +1,5 @@
 IMAGE ?= ghcr.io/sympozium-ai/llmfit-dra:dev
 KIND_CLUSTER ?= tailnet
-LLMFIT_SRC ?= $(HOME)/Code/llmfit
 
 .PHONY: build test image kind-load deploy undeploy scenarios fmt vet
 
@@ -16,9 +15,9 @@ fmt:
 vet:
 	go vet ./...
 
+# llmfit is built from the pinned submodule inside the Dockerfile.
 image:
-	mkdir -p third_party
-	cp $(LLMFIT_SRC)/target/release/llmfit third_party/llmfit
+	git submodule update --init
 	docker build -t $(IMAGE) .
 
 kind-load: image

@@ -1,3 +1,14 @@
+# Stage 1: build llmfit (Rust) from the pinned submodule — the capability
+# assessment engine. Hermetic: no host-built binaries, no glibc coupling.
+FROM rust:1-slim-bookworm AS llmfit-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY third_party/llmfit .
+RUN cargo build --release -p llmfit
+
+# Stage 2: build the DRA driver (Go).
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -5,12 +16,17 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /llmfit-dra ./cmd/llmfit-dra
 
-# Runtime carries the real llmfit binary (Rust, host-built — see `make image`),
-# so the base must match its glibc; pciutils+hwdata give llmfit's AMD/NVIDIA
-# sysfs paths proper lspci device names for its bandwidth database.
-FROM registry.fedoraproject.org/fedora-minimal:44
-RUN microdnf install -y pciutils hwdata && microdnf clean all
-COPY third_party/llmfit /usr/local/bin/llmfit
+# Stage 3: runtime. llmfit keys its bandwidth database off lspci device
+# names, so pci.ids must be recent enough to know current accelerators
+# (bookworm's 2023 database names Strix Halo just "AMD/ATI"). update-pciids
+# pulls the latest database at build time.
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pciutils curl ca-certificates \
+    && update-pciids \
+    && apt-get purge -y curl && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=llmfit-build /src/target/release/llmfit /usr/local/bin/llmfit
 COPY --from=build /llmfit-dra /llmfit-dra
 ENV LLMFIT_BIN=/usr/local/bin/llmfit
 ENTRYPOINT ["/llmfit-dra"]

@@ -97,9 +97,14 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 			}
 			if !resourceslice.DevicesDeepEqual(prev, devices) {
 				klog.InfoS("inventory changed; updating resourceslices", "devices", len(devices))
-				controller.Update(resources)
 				prev = devices
 			}
+			// Always push desired state, changed or not: Update re-queues a
+			// pool sync, making the publisher self-healing when slices are
+			// deleted externally (the helper's own delete-event path can miss
+			// recreation when a delete lands inside its mutation-cache TTL).
+			// An unchanged sync issues no API writes, so this is cheap.
+			controller.Update(resources)
 		}
 	}
 }
