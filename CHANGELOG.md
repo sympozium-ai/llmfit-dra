@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.1...v0.2.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* verify GHCR token has read:packages before writing pull-secret ([05dc79f](https://github.com/sympozium-ai/llmfit-dra/commit/05dc79fbd71e53c0632347d9e738f5eb21073235))
+
 ## [0.2.1](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.0...v0.2.1) (2026-07-02)
 
 
