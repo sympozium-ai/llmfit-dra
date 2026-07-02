@@ -275,12 +275,31 @@ else
   pass "llmfit assessed cpu0 (no GPU on this node)"
 fi
 # The capability must have arrived over the serve API (AF_UNIX sidecar),
-# not the exec fallback — and the sidecar must be healthy.
+# not the exec fallback — and the sidecar must be healthy. Retry: after a
+# driver restart the first cycle uses the exec fallback (sidecar warmup)
+# before flipping to api.
 driver_exec curl -sf --unix-socket /run/llmfit/llmfit.sock http://localhost/health >/dev/null \
   || fail "llmfit sidecar socket not serving /health"
-kubectl -n "$NS" logs ds/llmfit-dra -c llmfit-dra | grep -q 'llmfit capability transport" transport="api"' \
-  || fail "driver did not use the API transport (exec fallback or index in use?)"
+api_ok=""
+for i in $(seq 1 20); do
+  if kubectl -n "$NS" logs ds/llmfit-dra -c llmfit-dra | grep -q 'llmfit capability transport" transport="api"'; then api_ok=1; break; fi
+  sleep 3
+done
+[ -n "$api_ok" ] || fail "driver did not use the API transport within 60s (exec fallback or index in use?)"
 pass "capability flows over the AF_UNIX serve API (sidecar healthy)"
+
+echo "== Scenario 5b: metrics + health endpoints"
+# The driver serves /metrics, /healthz, /readyz on the hostNetwork port.
+driver_exec curl -sf http://localhost:9099/readyz >/dev/null \
+  || fail "driver /readyz not 200 (readiness probe would fail)"
+driver_exec curl -sf http://localhost:9099/healthz >/dev/null \
+  || fail "driver /healthz not 200 (liveness probe would fail)"
+mtxt=$(driver_exec curl -sf http://localhost:9099/metrics)
+echo "$mtxt" | grep -q 'llmfit_dra_capability_source{source="api"} 1' \
+  || fail "capability_source metric does not show api active"
+echo "$mtxt" | grep -q 'llmfit_dra_probe_duration_seconds' \
+  || fail "probe_duration metric missing"
+pass "/metrics, /healthz, /readyz serve; capability_source{api}=1"
 
 echo "== Scenario 6: cpu0 claim is env-only (runs anywhere, no accelerator needed)"
 # cpu0 is exclusive; in CPU-only mode scenario 4's consumer holds it.

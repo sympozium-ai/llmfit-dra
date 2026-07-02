@@ -19,9 +19,13 @@ llmfitSidecar:
   resources:
     requests:
       cpu: 10m
-      memory: 32Mi
+      memory: 96Mi
     limits:
-      memory: 128Mi
+      memory: 96Mi
+
+# Prometheus /metrics + /healthz + /readyz (also the node hostPort, since
+# the pod is hostNetwork — scrape at nodeIP:metricsPort).
+metricsPort: 9099
 
 # Driver flags.
 probeInterval: 30s
@@ -57,9 +61,12 @@ tolerations:
   - operator: Exists
 nodeSelector: {}
 
+# Driver container. Memory request == limit so a node-critical pod under its
+# limit is never memory-evicted; CPU is request-only (no throttling on a
+# latency-sensitive reconcile loop).
 resources:
   requests:
-    cpu: 10m
-    memory: 64Mi
+    cpu: 50m
+    memory: 192Mi
   limits:
-    memory: 256Mi
+    memory: 192Mi

@@ -96,7 +96,11 @@ which); identity comes from sysfs. Inventory updates are event-driven
 
 ## Configuration
 
-Everything is a Helm value: `image.*`, `probeInterval`, `kubeletPlugin`
+The driver serves Prometheus metrics and health on `nodeIP:9099`
+(`/metrics`, `/healthz`, `/readyz`) — `capability_source`, degraded-cycle,
+probe-latency, and prepare/unprepare counters.
+
+Everything is a Helm value: `image.*`, `metricsPort`, `probeInterval`, `kubeletPlugin`
 (false = publish-only inventory), `vendorDrivers` (coexistence list),
 `publishTaints` (needs the alpha `DRADeviceTaints` gate),
 `deviceClasses.enabled`, `admissionPolicy.enabled` (scopes the driver's

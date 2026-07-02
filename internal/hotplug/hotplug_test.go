@@ -1,6 +1,11 @@
 package hotplug
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
 
 func msg(parts ...string) []byte {
 	var b []byte
@@ -36,6 +41,24 @@ func TestRelevantSubsystems(t *testing.T) {
 	for sub, want := range cases {
 		if got := relevant(uevent{action: "add", subsystem: sub}); got != want {
 			t.Errorf("relevant(%q) = %v, want %v", sub, got, want)
+		}
+	}
+}
+
+func TestClassifyReadErr(t *testing.T) {
+	cases := []struct {
+		err  error
+		want readAction
+	}{
+		{unix.EINTR, actRetry}, // Go async preemption raises this routinely
+		{unix.EAGAIN, actRetry},
+		{unix.ENOBUFS, actOverrun},
+		{unix.EBADF, actFatal},
+		{errors.New("boom"), actFatal},
+	}
+	for _, c := range cases {
+		if got := classifyReadErr(c.err); got != c.want {
+			t.Errorf("classifyReadErr(%v) = %d, want %d", c.err, got, c.want)
 		}
 	}
 }

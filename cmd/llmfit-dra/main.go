@@ -22,34 +22,36 @@ import (
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
 	"github.com/sympozium-ai/llmfit-dra/internal/nodeplugin"
+	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 	"github.com/sympozium-ai/llmfit-dra/internal/publisher"
 )
 
 func main() {
 	var (
-		kubeconfig = flag.String("kubeconfig", "", "path to kubeconfig (default: in-cluster)")
-		nodeName   = flag.String("node-name", os.Getenv("NODE_NAME"), "node this agent runs on (default: NODE_NAME env)")
-		sysRoot    = flag.String("sys-root", envOr("LLMFIT_SYS_ROOT", "/sys"), "sysfs root (mount host /sys here in a container)")
-		procRoot   = flag.String("proc-root", envOr("LLMFIT_PROC_ROOT", "/proc"), "procfs root")
-		llmfitBin  = flag.String("llmfit-bin", envOr("LLMFIT_BIN", "llmfit"), "llmfit binary for capability assessment (exec fallback); empty disables")
-		llmfitURL  = flag.String("llmfit-url", envOr("LLMFIT_URL", ""), "llmfit serve API (unix:///path.sock or http://…); preferred over exec when set")
-		interval   = flag.Duration("probe-interval", 60*time.Second, "re-probe cadence; slices update only when inventory changes")
-		nodePlugin = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
-		cdiDir     = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
-		taints     = flag.Bool("publish-taints", false, "taint unhealthy devices NoSchedule (requires the DRADeviceTaints feature gate)")
-		vendors    = flag.String("vendor-drivers", publisher.DefaultVendorDrivers, "DRA drivers that own GPU allocation; their presence on this node demotes our GPUs to fitness-only (empty disables)")
+		kubeconfig  = flag.String("kubeconfig", "", "path to kubeconfig (default: in-cluster)")
+		nodeName    = flag.String("node-name", os.Getenv("NODE_NAME"), "node this agent runs on (default: NODE_NAME env)")
+		sysRoot     = flag.String("sys-root", envOr("LLMFIT_SYS_ROOT", "/sys"), "sysfs root (mount host /sys here in a container)")
+		procRoot    = flag.String("proc-root", envOr("LLMFIT_PROC_ROOT", "/proc"), "procfs root")
+		llmfitBin   = flag.String("llmfit-bin", envOr("LLMFIT_BIN", "llmfit"), "llmfit binary for capability assessment (exec fallback); empty disables")
+		llmfitURL   = flag.String("llmfit-url", envOr("LLMFIT_URL", ""), "llmfit serve API (unix:///path.sock or http://…); preferred over exec when set")
+		interval    = flag.Duration("probe-interval", 60*time.Second, "re-probe cadence; slices update only when inventory changes")
+		nodePlugin  = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
+		cdiDir      = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
+		taints      = flag.Bool("publish-taints", false, "taint unhealthy devices NoSchedule (requires the DRADeviceTaints feature gate)")
+		vendors     = flag.String("vendor-drivers", publisher.DefaultVendorDrivers, "DRA drivers that own GPU allocation; their presence on this node demotes our GPUs to fitness-only (empty disables)")
+		metricsAddr = flag.String("metrics-addr", envOr("METRICS_ADDR", ":9099"), "address for the /metrics, /healthz and /readyz server")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *llmfitURL, *interval, *nodePlugin, *cdiDir, *taints, *vendors); err != nil {
+	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *llmfitURL, *interval, *nodePlugin, *cdiDir, *taints, *vendors, *metricsAddr); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
 }
 
-func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag string) error {
+func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag, metricsAddr string) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
 	}
@@ -71,6 +73,18 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Liveness fails if the reconcile loop hasn't completed a cycle within
+	// three intervals — a hung loop becomes a failing probe, not a silent
+	// 1/1-Running node. Observability is not optional here: a listen failure
+	// takes the pod down for a restart.
+	health := observe.NewHealth(3 * interval)
+	go func() {
+		if err := health.Serve(ctx, metricsAddr); err != nil {
+			klog.ErrorS(err, "metrics/health server failed; exiting")
+			os.Exit(1)
+		}
+	}()
 
 	prober := probe.New(sysRoot, procRoot)
 	inv := nodeplugin.NewInventory()
@@ -109,13 +123,17 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 	defer controller.Stop()
 
 	if nodePlugin {
-		helper, err := nodeplugin.Start(ctx, client, nodeName, inv, cdiDir)
+		helper, err := nodeplugin.Start(ctx, client, nodeName, os.Getenv("POD_UID"), inv, cdiDir)
 		if err != nil {
 			return fmt.Errorf("starting kubelet plugin: %w", err)
 		}
 		defer helper.Stop()
 		klog.InfoS("kubelet DRA plugin registered", "cdiDir", cdiDir)
 	}
+	// Publisher and (optional) plugin are up: report ready. Liveness (Beat)
+	// tracks each subsequent successful cycle.
+	health.Ready()
+	health.Beat()
 
 	// Event-driven re-probe: kernel uevents on the drm/accel/pci subsystems
 	// (hot-attach, driver bind/unbind, error events) trigger an immediate
@@ -139,13 +157,15 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 			klog.InfoS("uevent-triggered re-probe")
 		case <-ticker.C:
 		}
+		start := time.Now()
 		refreshOpts()
 		devices, resources, err = desiredState(ctx, prober, idx, detector, nodeName, inv, opts)
 		if err != nil {
 			klog.ErrorS(err, "re-probe failed; keeping previous inventory")
-			continue
+			continue // a failed cycle does NOT Beat: liveness reflects real progress
 		}
-		if !resourceslice.DevicesDeepEqual(prev, devices) {
+		changed := !resourceslice.DevicesDeepEqual(prev, devices)
+		if changed {
 			klog.InfoS("inventory changed; updating resourceslices", "devices", len(devices))
 			prev = devices
 		}
@@ -155,6 +175,8 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 		// recreation when a delete lands inside its mutation-cache TTL).
 		// An unchanged sync issues no API writes, so this is cheap.
 		controller.Update(resources)
+		observe.ObserveProbe(time.Since(start), changed)
+		health.Beat()
 	}
 }
 
@@ -176,8 +198,10 @@ func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, d
 	if err != nil {
 		klog.ErrorS(err, "llmfit detection failed; falling back to embedded index")
 		sys = nil
+		observe.SetCapabilitySource("index")
 	} else {
 		klog.V(2).InfoS("llmfit capability assessment", "cpu", sys.CPUName, "gpus", len(sys.GPUs))
+		observe.SetCapabilitySource(detector.Transport())
 	}
 	devices := publisher.BuildDevices(probed, idx, ram, sys, opts)
 	return devices, publisher.BuildResources(nodeName, devices), nil

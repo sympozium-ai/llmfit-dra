@@ -80,15 +80,23 @@ jobs:
 
   # Push the Helm chart as an OCI artifact on release tags:
   #   helm install llmfit-dra oci://ghcr.io/sympozium-ai/charts/llmfit-dra
+  # needs: image so a chart is NEVER published pointing at an image tag that
+  # was not built — and it verifies the image manifest exists first.
   chart:
-    needs: test
+    needs: [test, image]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Push chart to GHCR
+      - name: Verify the matching image tag exists, then push chart
         run: |
+          version="${GITHUB_REF_NAME#v}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          # The chart's appVersion (== image tag) must be a real manifest.
+          if ! docker manifest inspect "ghcr.io/${{ github.repository }}:${version}" >/dev/null 2>&1; then
+            echo "::error::image ghcr.io/${{ github.repository }}:${version} not found — refusing to publish chart" >&2
+            exit 1
+          fi
           helm package charts/llmfit-dra -d /tmp/chart
           helm push /tmp/chart/llmfit-dra-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
 

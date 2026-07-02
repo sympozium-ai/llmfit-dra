@@ -26,6 +26,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 
+	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 	"github.com/sympozium-ai/llmfit-dra/internal/publisher"
 )
@@ -69,7 +70,15 @@ type Plugin struct {
 // (registrar under /var/lib/kubelet/plugins_registry, service under
 // /var/lib/kubelet/plugins/llmfit.ai) — the DaemonSet must mount both dirs
 // plus cdiDir from the host.
-func Start(ctx context.Context, client kubernetes.Interface, nodeName string, inv *Inventory, cdiDir string) (*kubeletplugin.Helper, error) {
+//
+// A non-empty podUID (from the downward API) enables the helper's rolling
+// update: the new instance registers a UID-suffixed socket so the kubelet
+// keeps talking to a prepared node across a driver restart, shrinking the
+// prepare-unavailability window. (True zero-downtime maxSurge is not
+// possible here — the pod is hostNetwork, so two instances can't share the
+// node's ports; the DaemonSet uses maxUnavailable:1.) Requires kubelet
+// >= 1.33, guaranteed by our >= 1.34 DRA floor.
+func Start(ctx context.Context, client kubernetes.Interface, nodeName, podUID string, inv *Inventory, cdiDir string) (*kubeletplugin.Helper, error) {
 	// The helper listens in this directory but does not create it.
 	if err := os.MkdirAll(filepath.Join(kubeletplugin.KubeletPluginsDir, publisher.DriverName), 0o750); err != nil {
 		return nil, fmt.Errorf("creating plugin socket dir: %w", err)
@@ -78,11 +87,15 @@ func Start(ctx context.Context, client kubernetes.Interface, nodeName string, in
 		// GC is best-effort: a failed cleanup must not block prepare service.
 		klog.FromContext(ctx).Error(err, "orphaned CDI spec GC failed; continuing")
 	}
-	return kubeletplugin.Start(ctx, &Plugin{inv: inv, cdiDir: cdiDir},
+	opts := []kubeletplugin.Option{
 		kubeletplugin.DriverName(publisher.DriverName),
 		kubeletplugin.KubeClient(client),
 		kubeletplugin.NodeName(nodeName),
-	)
+	}
+	if podUID != "" {
+		opts = append(opts, kubeletplugin.RollingUpdate(types.UID(podUID)))
+	}
+	return kubeletplugin.Start(ctx, &Plugin{inv: inv, cdiDir: cdiDir}, opts...)
 }
 
 // PrepareResourceClaims writes one CDI spec per claim and maps each
@@ -91,7 +104,13 @@ func Start(ctx context.Context, client kubernetes.Interface, nodeName string, in
 func (p *Plugin) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
 	results := make(map[types.UID]kubeletplugin.PrepareResult, len(claims))
 	for _, claim := range claims {
-		results[claim.UID] = p.prepareClaim(ctx, claim)
+		res := p.prepareClaim(ctx, claim)
+		if res.Err != nil {
+			observe.Prepare("error")
+		} else {
+			observe.Prepare("ok")
+		}
+		results[claim.UID] = res
 	}
 	return results, nil
 }
@@ -222,7 +241,13 @@ func gcOrphanedSpecs(ctx context.Context, client kubernetes.Interface, cdiDir st
 func (p *Plugin) UnprepareResourceClaims(ctx context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	results := make(map[types.UID]error, len(claims))
 	for _, claim := range claims {
-		results[claim.UID] = removeSpec(p.cdiDir, string(claim.UID))
+		err := removeSpec(p.cdiDir, string(claim.UID))
+		if err != nil {
+			observe.Unprepare("error")
+		} else {
+			observe.Unprepare("ok")
+		}
+		results[claim.UID] = err
 	}
 	return results, nil
 }

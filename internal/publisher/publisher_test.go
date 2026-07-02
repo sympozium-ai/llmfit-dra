@@ -342,11 +342,38 @@ func TestBuildDevicesVendorManagedDemotesGPUsOnly(t *testing.T) {
 			t.Errorf("%s (%s) must not be vendorManaged", d.Name, kind)
 		}
 	}
-	// Default: attribute absent everywhere.
+	// Default (no vendor driver present): only GPUs on a driver the plugin
+	// cannot prepare are marked — preparable-driver GPUs and non-GPUs are not.
+	byName := map[string]k8sDevice{}
 	for _, d := range BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{}) {
-		if _, marked := d.Attributes["vendorManaged"]; marked {
-			t.Errorf("%s vendorManaged without a vendor driver present", d.Name)
-		}
+		byName[d.Name] = d
+	}
+	if _, marked := byName["gpu-0000-00-02-0"].Attributes["vendorManaged"]; marked {
+		t.Error("preparable xe GPU must not be vendorManaged by default")
+	}
+	if _, marked := byName["npu-0000-00-0b-0"].Attributes["vendorManaged"]; marked {
+		t.Error("NPU must never be vendorManaged")
+	}
+}
+
+func TestBuildDevicesUnpreparableGPUIsFitnessOnly(t *testing.T) {
+	// A bare NVIDIA node (no vendor DRA driver present): the GPU is
+	// fit-selectable in attributes but excluded from the default classes,
+	// because the plugin cannot inject CUDA — we must not allocate a device
+	// we cannot prepare.
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "10de", PCIDevice: "2684", PCIAddr: "0000:41:00.0", Driver: "nvidia", VRAMBytes: 24 << 30},
+		{Kind: probe.KindGPU, Index: 1, PCIVendor: "1002", PCIDevice: "744c", PCIAddr: "0000:03:00.0", Driver: "amdgpu", VRAMBytes: 24 << 30},
+	}, mustIndex(t), systemRAM, nil, Options{})
+	byName := map[string]k8sDevice{}
+	for _, d := range devices {
+		byName[d.Name] = d
+	}
+	if _, marked := byName["gpu-0000-41-00-0"].Attributes["vendorManaged"]; !marked {
+		t.Error("NVIDIA GPU must be vendorManaged (unpreparable) even with no vendor driver present")
+	}
+	if _, marked := byName["gpu-0000-03-00-0"].Attributes["vendorManaged"]; marked {
+		t.Error("amdgpu GPU is preparable and must not be vendorManaged by default")
 	}
 }
 

@@ -24,6 +24,18 @@ import (
 // prefix are implicitly scoped to this driver.
 const DriverName = "llmfit.ai"
 
+// preparableGPUDrivers are the kernel drivers whose GPUs the kubelet plugin
+// can actually make usable — the open stacks where DRM render-node access is
+// the whole runtime (amdgpu also gets /dev/kfd). A GPU on any other driver,
+// notably NVIDIA's proprietary "nvidia" (which needs /dev/nvidia* and vendor
+// libraries the plugin does not inject), is published fitness-only. Keep in
+// sync with nodeplugin.editsFor.
+var preparableGPUDrivers = map[string]bool{
+	"amdgpu": true,
+	"xe":     true,
+	"i915":   true,
+}
+
 // Options tunes BuildDevices beyond its inputs.
 type Options struct {
 	// Taints adds a NoSchedule device taint to unhealthy devices. Behind
@@ -143,7 +155,17 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			if unified != nil {
 				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: unified}
 			}
-			if opts.VendorManagedGPUs && d.Kind == probe.KindGPU {
+			// Fitness-only (vendorManaged, excluded from the default classes)
+			// when EITHER a vendor DRA driver owns this node's GPUs, OR the
+			// kernel driver is one the kubelet plugin cannot prepare — a
+			// default-class claim must never allocate a device we can't make
+			// usable. NVIDIA's proprietary driver is the motivating case: we
+			// inject the DRM render node, but CUDA needs /dev/nvidia* and
+			// vendor libraries we do not, so a bare NVIDIA node (no vendor DRA
+			// driver installed) would otherwise ship a fit-selectable but
+			// unpreparable GPU. The attributes stay published for the
+			// fitness-companion matchAttribute pattern.
+			if d.Kind == probe.KindGPU && (opts.VendorManagedGPUs || !preparableGPUDrivers[d.Driver]) {
 				attrs["vendorManaged"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(true)}
 			}
 

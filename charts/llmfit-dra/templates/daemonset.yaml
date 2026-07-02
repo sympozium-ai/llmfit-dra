@@ -13,6 +13,10 @@ spec:
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
+      # maxSurge is not usable: the pod is hostNetwork, so two instances
+      # can't share the node's ports (metrics, plugin sockets). The plugin's
+      # RollingUpdate option + a pinned image (no pull on restart) keep the
+      # per-node window to a fast restart.
       maxUnavailable: 1
   template:
     metadata:
@@ -52,6 +56,7 @@ spec:
             - --kubelet-plugin={{ .Values.kubeletPlugin }}
             - --cdi-dir={{ .Values.cdiDir }}
             - --vendor-drivers={{ .Values.vendorDrivers }}
+            - --metrics-addr=:{{ .Values.metricsPort }}
             {{- if .Values.llmfitSidecar.enabled }}
             - --llmfit-url=unix://{{ .Values.llmfitSidecar.socketPath }}
             {{- end }}
@@ -63,6 +68,25 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # RollingUpdate: the plugin registers a UID-suffixed socket so the
+            # kubelet keeps a prepared node across a driver restart.
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+              hostPort: {{ .Values.metricsPort }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
           securityContext:
             capabilities:
               add: ["NET_ADMIN"] # uevent netlink subscribe

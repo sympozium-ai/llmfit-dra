@@ -9,9 +9,9 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: llmfit-dra
-  # One instance at a time per node; the kubelet retries prepares across the
-  # (short) gap. maxSurge would need the helper's RollingUpdate socket-name
-  # option — deliberately not used yet.
+  # One instance at a time per node (maxSurge is impossible under hostNetwork
+  # — two pods can't share the node's ports). The plugin's RollingUpdate
+  # option + a pinned image keep the per-node window to a fast restart.
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
@@ -38,17 +38,38 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: llmfit-dra
-          image: ghcr.io/sympozium-ai/llmfit-dra:main
-          imagePullPolicy: Always
+          # Pin an immutable tag so a node-critical pod can recover from cache
+          # (imagePullPolicy IfNotPresent) during a registry outage. The Helm
+          # chart tracks the release version automatically; bump this by hand.
+          image: ghcr.io/sympozium-ai/llmfit-dra:0.2.1
+          imagePullPolicy: IfNotPresent
           args:
             - --probe-interval=30s
             - --v=2
             - --llmfit-url=unix:///run/llmfit/llmfit.sock
+            - --metrics-addr=:9099
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          ports:
+            - name: metrics
+              containerPort: 9099
+              hostPort: 9099
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
           securityContext:
             capabilities:
               add: ["NET_ADMIN"] # uevent netlink subscribe
@@ -78,8 +99,8 @@ spec:
         # socket (UDS, not TCP: this pod is hostNetwork — a port would bind
         # the NODE's loopback).
         - name: llmfit
-          image: ghcr.io/sympozium-ai/llmfit-dra:main
-          imagePullPolicy: Always
+          image: ghcr.io/sympozium-ai/llmfit-dra:0.2.1
+          imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/llmfit", "serve", "--unix-socket", "/run/llmfit/llmfit.sock"]
           livenessProbe:
             exec:
@@ -92,9 +113,9 @@ spec:
           resources:
             requests:
               cpu: 10m
-              memory: 32Mi
+              memory: 96Mi
             limits:
-              memory: 128Mi
+              memory: 96Mi
       volumes:
         - name: sysfs
           hostPath:

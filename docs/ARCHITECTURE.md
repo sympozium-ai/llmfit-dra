@@ -230,6 +230,29 @@ survives `ENOBUFS` storms by forcing a re-probe and continuing. Vendor event
 streams (XID/DCGM) are deliberately out of scope — that is the vendor
 driver's job on nodes where one runs.
 
+## Observability and day-2 operations
+
+The driver is built to degrade quietly, so it must report loudly. It serves
+`/metrics`, `/healthz`, and `/readyz` on a hostNetwork port (default `:9099`,
+scrape at `nodeIP:9099`):
+
+- **Metrics** (`internal/observe`): `capability_source{source=…}` (1 on the
+  active transport, so a fleet-wide fallback is one query),
+  `degraded_cycles_total`, `probe_duration_seconds`, `slice_updates_total`,
+  and `prepare_total{result}` / `unprepare_total{result}`.
+- **Liveness** (`/healthz`) fails if the reconcile loop hasn't completed a
+  cycle within three probe intervals — a hung loop becomes a failing probe,
+  not a silent 1/1-Running node. **Readiness** (`/readyz`) goes true only
+  after the publisher and plugin start.
+
+**Rollout.** The DaemonSet uses `maxUnavailable: 1` (not `maxSurge` — the pod
+is hostNetwork, so two instances can't share the node's ports). The kubelet
+plugin's `RollingUpdate` option (pod UID via the downward API) registers a
+UID-suffixed socket so the kubelet keeps a prepared node across the restart,
+and an immutable pinned image with `imagePullPolicy: IfNotPresent` means the
+restart involves no pull — the per-node window is a fast restart, and the
+node-critical container can recover from cache during a registry outage.
+
 ## Security model
 
 The DaemonSet is deliberately minimal in privilege:

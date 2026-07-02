@@ -17,8 +17,8 @@ import (
 // (source llmfit→index→llmfit) fleet-wide — slices only degrade to the
 // index after llmfit has been unreachable for longer than maxStale.
 type Detector struct {
-	api    func(context.Context) (*System, error) // nil when no URL configured
-	exec   func(context.Context) (*System, error) // nil when bin is empty
+	api      func(context.Context) (*System, error) // nil when no URL configured
+	exec     func(context.Context) (*System, error) // nil when bin is empty
 	maxStale time.Duration
 
 	mu        sync.Mutex
@@ -85,4 +85,13 @@ func (d *Detector) Detect(ctx context.Context) (*System, error) {
 		firstErr = fmt.Errorf("no llmfit transport configured")
 	}
 	return nil, firstErr
+}
+
+// Transport reports the transport that served the most recent successful
+// Detect ("api" | "exec" | "cache"), for metrics. Empty before the first
+// success.
+func (d *Detector) Transport() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.transport
 }
