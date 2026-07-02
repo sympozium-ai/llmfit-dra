@@ -37,6 +37,16 @@ type Device struct {
 	// the device shares system RAM (unified memory).
 	VRAMBytes uint64
 
+	// DevNode is the primary /dev path, named by devtmpfs convention from
+	// the sysfs class entry: /dev/dri/cardN for GPUs, /dev/accel/accelN
+	// for NPUs; empty for the CPU device. RenderNode is the GPU's
+	// unprivileged DRM render node (/dev/dri/renderD128), paired via the
+	// device's sysfs drm/ dir. These are what the kubelet plugin injects
+	// into containers via CDI (Phase 2); paths are host-relative and not
+	// stat'ed — existence is the plugin's concern at prepare time.
+	DevNode    string
+	RenderNode string
+
 	// CPUModel and SystemRAMBytes are set on the CPU fallback device.
 	CPUModel       string
 	SystemRAMBytes uint64
@@ -134,6 +144,13 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 			VRAMBytes: readUint(filepath.Join(devDir, "mem_info_vram_total")),
 		}
 		d.PCIAddr, d.PCIeRoot = pciAddress(devDir)
+		switch kind {
+		case KindGPU:
+			d.DevNode = "/dev/dri/" + e.Name()
+			d.RenderNode = renderNode(devDir)
+		case KindNPU:
+			d.DevNode = "/dev/accel/" + e.Name()
+		}
 		out = append(out, d)
 		idx++
 	}
@@ -157,6 +174,23 @@ func (p *Prober) cpuDevice() (Device, error) {
 // unified-memory devices.
 func (p *Prober) MemTotalBytes() (uint64, error) {
 	return memTotalBytes(filepath.Join(p.ProcRoot, "meminfo"))
+}
+
+// renderNode pairs a DRM card with its render node. The device dir's drm/
+// subdir lists every DRM minor backed by that PCI device (cardN plus
+// renderDNNN), so the pairing survives multi-GPU enumeration where render
+// minors (128, 129, …) don't line up with card indices.
+func renderNode(devDir string) string {
+	entries, err := os.ReadDir(filepath.Join(devDir, "drm"))
+	if err != nil {
+		return "" // no render node (e.g. driver without render capability)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "renderD") {
+			return "/dev/dri/" + e.Name()
+		}
+	}
+	return ""
 }
 
 func readHexID(path string) string {
