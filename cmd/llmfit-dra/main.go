@@ -18,6 +18,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 
+	"github.com/sympozium-ai/llmfit-dra/internal/hotplug"
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
 	"github.com/sympozium-ai/llmfit-dra/internal/nodeplugin"
@@ -35,17 +36,18 @@ func main() {
 		interval   = flag.Duration("probe-interval", 60*time.Second, "re-probe cadence; slices update only when inventory changes")
 		nodePlugin = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
 		cdiDir     = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
+		taints     = flag.Bool("publish-taints", false, "taint unhealthy devices NoSchedule (requires the DRADeviceTaints feature gate)")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir); err != nil {
+	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir, *taints); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
 }
 
-func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string) error {
+func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
 	}
@@ -70,7 +72,8 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 
 	prober := probe.New(sysRoot, procRoot)
 	inv := nodeplugin.NewInventory()
-	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName, inv)
+	opts := publisher.Options{Taints: taints}
+	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
 	if err != nil {
 		return err
 	}
@@ -91,9 +94,16 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 		klog.InfoS("kubelet DRA plugin registered", "cdiDir", cdiDir)
 	}
 
-	// Periodic re-probe; Update is a no-op server-side when nothing changed
-	// because the helper diffs desired vs published state. udev/netlink
-	// event triggering is the planned upgrade (see README roadmap).
+	// Event-driven re-probe: kernel uevents on the drm/accel/pci subsystems
+	// (hot-attach, driver bind/unbind, error events) trigger an immediate
+	// walk; the ticker remains as the reconciliation floor. Update is a
+	// no-op server-side when nothing changed because the helper diffs
+	// desired vs published state.
+	uevents, err := hotplug.Listen(ctx, 2*time.Second)
+	if err != nil {
+		klog.ErrorS(err, "uevent listener unavailable (needs hostNetwork); ticker-only probing")
+		uevents = nil // nil channel: select arm never fires
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	prev := devices
@@ -102,27 +112,29 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 		case <-ctx.Done():
 			klog.InfoS("shutting down")
 			return nil
+		case <-uevents:
+			klog.InfoS("uevent-triggered re-probe")
 		case <-ticker.C:
-			devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName, inv)
-			if err != nil {
-				klog.ErrorS(err, "re-probe failed; keeping previous inventory")
-				continue
-			}
-			if !resourceslice.DevicesDeepEqual(prev, devices) {
-				klog.InfoS("inventory changed; updating resourceslices", "devices", len(devices))
-				prev = devices
-			}
-			// Always push desired state, changed or not: Update re-queues a
-			// pool sync, making the publisher self-healing when slices are
-			// deleted externally (the helper's own delete-event path can miss
-			// recreation when a delete lands inside its mutation-cache TTL).
-			// An unchanged sync issues no API writes, so this is cheap.
-			controller.Update(resources)
 		}
+		devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
+		if err != nil {
+			klog.ErrorS(err, "re-probe failed; keeping previous inventory")
+			continue
+		}
+		if !resourceslice.DevicesDeepEqual(prev, devices) {
+			klog.InfoS("inventory changed; updating resourceslices", "devices", len(devices))
+			prev = devices
+		}
+		// Always push desired state, changed or not: Update re-queues a
+		// pool sync, making the publisher self-healing when slices are
+		// deleted externally (the helper's own delete-event path can miss
+		// recreation when a delete lands inside its mutation-cache TTL).
+		// An unchanged sync issues no API writes, so this is cheap.
+		controller.Update(resources)
 	}
 }
 
-func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, llmfitBin, nodeName string, inv *nodeplugin.Inventory) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
+func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, llmfitBin, nodeName string, inv *nodeplugin.Inventory, opts publisher.Options) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
 	probed, err := prober.Walk()
 	if err != nil {
 		return nil, nil, fmt.Errorf("device tree walk: %w", err)
@@ -146,7 +158,7 @@ func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, l
 			klog.V(2).InfoS("llmfit capability assessment", "cpu", sys.CPUName, "gpus", len(sys.GPUs))
 		}
 	}
-	devices := publisher.BuildDevices(probed, idx, ram, sys)
+	devices := publisher.BuildDevices(probed, idx, ram, sys, opts)
 	return devices, publisher.BuildResources(nodeName, devices), nil
 }
 

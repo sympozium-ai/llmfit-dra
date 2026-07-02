@@ -24,11 +24,20 @@ import (
 // prefix are implicitly scoped to this driver.
 const DriverName = "llmfit.ai"
 
+// Options tunes BuildDevices beyond its inputs.
+type Options struct {
+	// Taints adds a NoSchedule device taint to unhealthy devices. Behind
+	// an option because DRADeviceTaints is an alpha feature gate: servers
+	// without it silently drop the field, which the resourceslice helper
+	// reports as a DroppedFieldsError on every sync.
+	Taints bool
+}
+
 // BuildDevices maps probed devices into DRA device entries. Capability is
 // sourced, in order of preference: llmfit (real assessment layer, nil-able),
 // the embedded index, bare probe facts. The probe always supplies identity
 // (PCI address, root, driver). systemRAM sizes unified-memory devices.
-func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sys *llmfit.System) []resourceapi.Device {
+func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sys *llmfit.System, opts Options) []resourceapi.Device {
 	out := make([]resourceapi.Device, 0, len(devices))
 	for _, d := range devices {
 		healthy, reason := d.Healthy()
@@ -131,6 +140,13 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 		dev := resourceapi.Device{
 			Name:       d.Name(),
 			Attributes: attrs,
+		}
+		if opts.Taints && !healthy {
+			dev.Taints = []resourceapi.DeviceTaint{{
+				Key:    DriverName + "/unhealthy",
+				Value:  reason,
+				Effect: resourceapi.DeviceTaintEffectNoSchedule,
+			}}
 		}
 		if memBytes > 0 {
 			dev.Capacity = map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{

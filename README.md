@@ -37,12 +37,19 @@ pod, with zero Sympozium components:
 - **`llmfit claim`** generates the fit CEL from the model database (see
   below).
 
-**Phase 3 — alignment & liveness (in progress).** Shipped so far: the
-standardized `resource.kubernetes.io/pcieRoot` attribute + `matchAttribute`
-alignment (scenario 11), and honest health — `healthy` is computed per
-probe cycle (kernel driver bound, no uncorrectable RAS errors) with a
-`healthReason` attribute when false. Pending: event-driven health
-(XID/DCGM), device taints, udev/netlink hot-attach.
+**Phase 3 — alignment & liveness (done, minus vendor-hardware items).**
+Shipped: the standardized `resource.kubernetes.io/pcieRoot` attribute +
+`matchAttribute` alignment (scenario 11); honest health — `healthy` is
+computed per probe cycle (kernel driver bound, no uncorrectable RAS
+errors) with a `healthReason` attribute when false; **event-driven
+re-probe** — a netlink uevent listener (drm/accel/pci subsystems,
+`hostNetwork`) triggers an immediate walk on hot-attach, driver
+bind/unbind, and error events, with the ticker as reconciliation floor
+(scenario 12); and `--publish-taints`, which taints unhealthy devices
+`NoSchedule` (off by default — needs the alpha `DRADeviceTaints` gate).
+Blocked on hardware we don't have: vendor event streams (XID/DCGM — the
+vendor DRA driver's job on nodes where one runs) and live cross-driver
+`matchAttribute` against NVIDIA/Neuron (needs a mixed node).
 
 **Stage two: the real llmfit is the capability source.** The image ships the
 llmfit binary (Rust); the DaemonSet runs privileged with host `/sys`, `/dev`
@@ -233,7 +240,7 @@ from the probe (cpu0-only inventory), restoring the DaemonSet afterwards.
 
 ## Roadmap
 
-- **Phase 3** (in progress): done — standardized `pcieRoot` alignment (scenario 11), baseline health (`driverUnbound`/`uncorrectableEcc`). Pending — event-driven health (XID/DCGM watches), device taints for de-scheduling, udev/netlink hot-attach instead of the periodic re-probe, cross-driver `matchAttribute` against a vendor DRA driver (needs a mixed node).
+- **Hardware-blocked Phase 3 tails**: live cross-driver `matchAttribute` against a vendor DRA driver (needs a mixed NVIDIA/Neuron node); vendor event streams (XID/DCGM) as an additional health source.
 - **Index as artifact**: extract `internal/index/data.json` into a versioned dataset other drivers can vendor.
 - **Image base**: optionally consume llmfit's release image (`COPY --from`) instead of compiling the submodule — faster CI, at the cost of pinning an image digest rather than a source SHA.
 

@@ -20,6 +20,10 @@ spec:
       # Stage two: full host access. llmfit assesses the node exactly as it
       # would when run natively — real /sys, real /dev, host PID namespace.
       hostPID: true
+      # The uevent netlink socket is network-namespace scoped: hostNetwork
+      # is what lets the hot-attach listener see host device events.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: llmfit-dra
           image: ghcr.io/sympozium-ai/llmfit-dra:main

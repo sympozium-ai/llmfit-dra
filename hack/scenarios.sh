@@ -24,6 +24,9 @@
 #                 matchAttribute resource.kubernetes.io/pcieRoot (the
 #                 standardized cross-driver attribute); both allocate, both
 #                 prepare into one pod (multi-device CDI merge).
+#  12. Hotplug  — Phase 3: a synthesized kernel uevent (echo change >
+#                 …/uevent on the host) triggers an immediate re-probe
+#                 instead of waiting out the ticker.
 #
 set -euo pipefail
 
@@ -482,6 +485,27 @@ EOF
   pass "gpu+npu aligned on one pcieRoot, both prepared into one pod (gpu=$gpu_env npu=$npu_env)"
 else
   echo "  SKIP: needs both gpu0 and npu0 on the node"
+fi
+
+echo "== Scenario 12: uevent-triggered re-probe (hot-attach path)"
+# Synthesize a kernel uevent by writing to a drm device's uevent file in
+# the HOST mount namespace (the driver pod's /sys mount is read-only).
+if driver_exec nsenter -t 1 -m -- sh -c 'ls /sys/class/drm/card*/uevent >/dev/null 2>&1'; then
+  before=$(kubectl -n "$NS" logs ds/llmfit-dra | grep -c "uevent-triggered re-probe" || true)
+  # kind nodes mount /sys read-only: remount rw just long enough to write
+  # (echo into a uevent file makes the kernel emit that event for real).
+  driver_exec nsenter -t 1 -m -- sh -c \
+    'u=$(ls -d /sys/class/drm/card*/uevent | head -1); mount -o remount,rw /sys; rc=1; echo change > "$u" && rc=0; mount -o remount,ro /sys; exit $rc'
+  triggered=""
+  for i in $(seq 1 15); do
+    after=$(kubectl -n "$NS" logs ds/llmfit-dra | grep -c "uevent-triggered re-probe" || true)
+    if [ "$after" -gt "$before" ]; then triggered=1; break; fi
+    sleep 2
+  done
+  [ -n "$triggered" ] || fail "no uevent-triggered re-probe within 30s (listener dead? hostNetwork missing?)"
+  pass "synthesized drm uevent re-probed within seconds (count $before → $after)"
+else
+  echo "  SKIP: no /sys/class/drm devices on the host to synthesize a uevent from"
 fi
 
 echo

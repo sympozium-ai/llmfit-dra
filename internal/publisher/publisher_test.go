@@ -39,7 +39,7 @@ func mustIndex(t *testing.T) *index.Index {
 }
 
 func TestBuildDevicesAttributeMapping(t *testing.T) {
-	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil)
+	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{})
 	if len(devices) != 5 {
 		t.Fatalf("expected 5 devices, got %d", len(devices))
 	}
@@ -90,7 +90,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 }
 
 func TestBuildDevicesRespectsAttributeLimits(t *testing.T) {
-	for _, d := range BuildDevices(testDevices(), mustIndex(t), systemRAM, nil) {
+	for _, d := range BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{}) {
 		total := len(d.Attributes) + len(d.Capacity)
 		if total > 32 {
 			t.Errorf("device %s has %d attributes+capacities, exceeding the DRA limit of 32", d.Name, total)
@@ -104,7 +104,7 @@ func TestBuildDevicesRespectsAttributeLimits(t *testing.T) {
 }
 
 func TestBuildResources(t *testing.T) {
-	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil)
+	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{})
 	res := BuildResources("carbon", devices)
 	pool, ok := res.Pools["carbon"]
 	if !ok {
@@ -190,7 +190,7 @@ func TestBuildDevicesWithLLMFit(t *testing.T) {
 		{Kind: probe.KindNPU, Index: 0, PCIVendor: "1022", PCIDevice: "17f0", Driver: "amdxdna"},
 		{Kind: probe.KindCPU, Index: 0, CPUModel: "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S", SystemRAMBytes: systemRAM},
 	}
-	devices := BuildDevices(probed, mustIndex(t), systemRAM, sys)
+	devices := BuildDevices(probed, mustIndex(t), systemRAM, sys, Options{})
 
 	byName := map[string]k8sDevice{}
 	for _, d := range devices {
@@ -221,7 +221,7 @@ func TestBuildDevicesWithLLMFit(t *testing.T) {
 }
 
 func TestBuildDevicesLLMFitFallbackWhenNil(t *testing.T) {
-	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil)
+	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{})
 	byName := map[string]k8sDevice{}
 	for _, d := range devices {
 		byName[d.Name] = d
@@ -244,7 +244,7 @@ func TestBuildDevicesLLMFitBandwidthFallsBackToIndex(t *testing.T) {
 		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "1586", Driver: "amdgpu"},
 		{Kind: probe.KindCPU, Index: 0, SystemRAMBytes: systemRAM},
 	}
-	devices := BuildDevices(probed, mustIndex(t), systemRAM, sys)
+	devices := BuildDevices(probed, mustIndex(t), systemRAM, sys, Options{})
 	for _, d := range devices {
 		if d.Name != "gpu0" {
 			continue
@@ -263,7 +263,7 @@ func TestBuildDevicesHealth(t *testing.T) {
 		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "744c", Driver: "amdgpu", RASUncorrectable: 1},
 		{Kind: probe.KindGPU, Index: 1, PCIVendor: "8086", PCIDevice: "64a0"}, // no driver bound
 		{Kind: probe.KindCPU, Index: 0, SystemRAMBytes: systemRAM},
-	}, idx, systemRAM, nil)
+	}, idx, systemRAM, nil, Options{Taints: true})
 
 	byName := map[string]k8sDevice{}
 	for _, d := range devices {
@@ -276,5 +276,25 @@ func TestBuildDevicesHealth(t *testing.T) {
 	assertBool(t, byName["cpu0"].Attributes, "healthy", true)
 	if _, ok := byName["cpu0"].Attributes["healthReason"]; ok {
 		t.Error("healthy device must not carry healthReason")
+	}
+
+	// Options{Taints: true}: unhealthy devices carry a NoSchedule taint…
+	gpu0Taints := byName["gpu0"].Taints
+	if len(gpu0Taints) != 1 || gpu0Taints[0].Key != "llmfit.ai/unhealthy" ||
+		gpu0Taints[0].Value != "uncorrectableEcc" || gpu0Taints[0].Effect != resourceapi.DeviceTaintEffectNoSchedule {
+		t.Errorf("gpu0 taints = %+v", gpu0Taints)
+	}
+	// …healthy devices never do.
+	if len(byName["cpu0"].Taints) != 0 {
+		t.Errorf("cpu0 must not be tainted, got %+v", byName["cpu0"].Taints)
+	}
+}
+
+func TestBuildDevicesNoTaintsByDefault(t *testing.T) {
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "744c", RASUncorrectable: 9},
+	}, mustIndex(t), systemRAM, nil, Options{})
+	if len(devices[0].Taints) != 0 {
+		t.Errorf("taints published without opt-in: %+v", devices[0].Taints)
 	}
 }
