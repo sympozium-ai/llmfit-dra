@@ -100,7 +100,7 @@ func TestPrepareGPUWritesCDISpec(t *testing.T) {
 		t.Fatalf("spec devices = %+v", spec.Devices)
 	}
 	edits := spec.Devices[0].ContainerEdits
-	wantEnv := []string{"LLMFIT_DEVICE=gpu0", "LLMFIT_DEVICE_KIND=gpu", "LLMFIT_RENDER_NODE=/dev/dri/renderD128"}
+	wantEnv := []string{"LLMFIT_DEVICE=gpu0", "LLMFIT_DEVICE_KIND=gpu", "LLMFIT_DEVICE_GPU0=/dev/dri/renderD128", "LLMFIT_RENDER_NODE=/dev/dri/renderD128"}
 	if !reflect.DeepEqual(edits.Env, wantEnv) {
 		t.Errorf("env = %v, want %v", edits.Env, wantEnv)
 	}
@@ -122,7 +122,7 @@ func TestPrepareCPUIsEnvOnly(t *testing.T) {
 	if len(edits.DeviceNodes) != 0 {
 		t.Errorf("cpu0 must not inject device nodes, got %v", edits.DeviceNodes)
 	}
-	wantEnv := []string{"LLMFIT_DEVICE=cpu0", "LLMFIT_DEVICE_KIND=cpu"}
+	wantEnv := []string{"LLMFIT_DEVICE=cpu0", "LLMFIT_DEVICE_KIND=cpu", "LLMFIT_DEVICE_CPU0=cpu"}
 	if !reflect.DeepEqual(edits.Env, wantEnv) {
 		t.Errorf("env = %v, want %v", edits.Env, wantEnv)
 	}

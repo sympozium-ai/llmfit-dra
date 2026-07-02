@@ -20,6 +20,10 @@
 #  10. Deployment — the Phase 2 exit criterion verbatim: a vanilla
 #                 Deployment + generated ResourceClaimTemplate lands on the
 #                 fit device and runs; the per-pod claim is GC'd on delete.
+#  11. Align    — Phase 3: one claim requests gpu + npu constrained by
+#                 matchAttribute resource.kubernetes.io/pcieRoot (the
+#                 standardized cross-driver attribute); both allocate, both
+#                 prepare into one pod (multi-device CDI merge).
 #
 set -euo pipefail
 
@@ -419,6 +423,63 @@ EOF
   pass "Deployment ran on gpu0 via generated template; per-pod claim GC'd on delete"
 else
   echo "  SKIP: needs an accelerator (generated CEL has a bandwidth floor)"
+fi
+
+echo "== Scenario 11: matchAttribute alignment via resource.kubernetes.io/pcieRoot"
+HAS_NPU=0
+our_slice | jq -e '.[0].spec.devices[] | select(.name == "npu0")' >/dev/null && HAS_NPU=1
+if [ "$HAS_GPU" = 1 ] && [ "$HAS_NPU" = 1 ]; then
+  cleanup11() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-aligned-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-aligned-claim >/dev/null 2>&1; }
+  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11' EXIT
+  cleanup11
+  kubectl apply -f - <<'EOF' >/dev/null
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: llmfit-aligned-claim
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.llmfit.ai
+      - name: npu
+        exactly:
+          deviceClassName: npu.llmfit.ai
+    constraints:
+      - requests: ["gpu", "npu"]
+        matchAttribute: resource.kubernetes.io/pcieRoot
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-aligned-consumer
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sleep", "600"]
+      resources:
+        claims:
+          - name: accel
+  resourceClaims:
+    - name: accel
+      resourceClaimName: llmfit-aligned-claim
+EOF
+  kubectl wait --for=condition=Ready pod/llmfit-aligned-consumer --timeout=120s >/dev/null \
+    || fail "aligned gpu+npu claim did not allocate/prepare (matchAttribute broken?)"
+  count=$(kubectl get resourceclaim llmfit-aligned-claim -o jsonpath='{.status.allocation.devices.results}' | jq 'length')
+  [ "$count" = 2 ] || fail "expected 2 allocated devices, got $count"
+  gpu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c 'echo $LLMFIT_DEVICE_GPU0')
+  npu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c 'echo $LLMFIT_DEVICE_NPU0')
+  [ -n "$gpu_env" ] && [ -n "$npu_env" ] || fail "multi-device CDI merge lost a device (gpu='$gpu_env' npu='$npu_env')"
+  kubectl exec llmfit-aligned-consumer -- test -e /dev/accel/accel0 || fail "npu device node not injected"
+  kubectl exec llmfit-aligned-consumer -- sh -c 'test -e "$LLMFIT_DEVICE_GPU0"' || fail "gpu device node not injected"
+  pass "gpu+npu aligned on one pcieRoot, both prepared into one pod (gpu=$gpu_env npu=$npu_env)"
+else
+  echo "  SKIP: needs both gpu0 and npu0 on the node"
 fi
 
 echo

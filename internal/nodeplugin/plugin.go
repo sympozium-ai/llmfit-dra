@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -128,11 +129,24 @@ func (p *Plugin) prepareClaim(ctx context.Context, claim *resourceapi.ResourceCl
 // device needs, plus LLMFIT_* env identifying what was granted. amdgpu
 // compute additionally requires the node-global /dev/kfd (KFD is how ROCm
 // reaches the GPU; the render node alone only covers Vulkan).
+//
+// LLMFIT_DEVICE/_KIND/_RENDER_NODE describe *a* device — with multiple
+// devices in one claim the runtime merges the edits and the last write
+// wins, so LLMFIT_DEVICE_<NAME> is the per-device key that survives the
+// merge (value: the device node consumers should open, or the kind).
 func editsFor(d probe.Device) containerEdits {
+	perDevice := d.RenderNode
+	if perDevice == "" {
+		perDevice = d.DevNode
+	}
+	if perDevice == "" {
+		perDevice = string(d.Kind)
+	}
 	edits := containerEdits{
 		Env: []string{
 			"LLMFIT_DEVICE=" + d.Name(),
 			"LLMFIT_DEVICE_KIND=" + string(d.Kind),
+			"LLMFIT_DEVICE_" + strings.ToUpper(d.Name()) + "=" + perDevice,
 		},
 	}
 	if d.RenderNode != "" {

@@ -55,6 +55,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 	assertStr(t, igpu.Attributes, "kind", "gpu")
 	assertStr(t, igpu.Attributes, "driver", "xe")
 	assertStr(t, igpu.Attributes, "pcieRoot", "pci0000:00")
+	assertStr(t, igpu.Attributes, "resource.kubernetes.io/pcieRoot", "pci0000:00")
 	assertBool(t, igpu.Attributes, "unifiedMemory", true)
 	assertBool(t, igpu.Attributes, "indexed", true)
 	assertBool(t, igpu.Attributes, "healthy", true)

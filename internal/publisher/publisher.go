@@ -68,6 +68,11 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			}
 			if d.PCIeRoot != "" {
 				attrs["pcieRoot"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PCIeRoot)}
+				// The standardized cross-driver spelling (Phase 3): lets a
+				// single claim align our device with a vendor driver's via
+				// constraints.matchAttribute, since both drivers publish the
+				// same qualified attribute for the same silicon.
+				attrs["resource.kubernetes.io/pcieRoot"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PCIeRoot)}
 			}
 
 			// Capability, best source first: llmfit → index → probe.

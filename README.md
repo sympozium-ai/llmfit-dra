@@ -203,6 +203,7 @@ docker/kind daemon lives on another host (e.g. over tailscale).
 8. **Restart** — running consumers survive a driver restart; the new instance prepares fresh claims and unprepares the old instance's.
 9. **Claim generation** — `llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -` (generator runs from the image) allocates and runs.
 10. **Deployment** — the Phase 2 exit criterion verbatim: a vanilla Deployment consuming a `llmfit claim --template`-generated ResourceClaimTemplate lands on the fit device and runs; the per-pod claim is garbage-collected on delete.
+11. **Alignment** — one claim requests gpu + npu constrained by `matchAttribute: resource.kubernetes.io/pcieRoot`; both allocate and both prepare into one pod (multi-device CDI merge, per-device `LLMFIT_DEVICE_<NAME>` env).
 
 GPU-specific assertions self-skip on nodes without a `gpu0`, so the suite is
 identical on the dev rig and in CI. `make scenarios-cpu` reproduces the CI
@@ -212,7 +213,7 @@ restoring the DaemonSet afterwards.
 ## Roadmap
 
 - **Phase 2 — complete**: shipped DeviceClasses, probe device-node capture, kubelet DRA plugin (`NodePrepareResources` → CDI), and the `llmfit claim <model>` generator (`llmfit claim <model> --min-tps N | kubectl apply -f -`). The generator ships in llmfit `v0.9.35` (the pinned submodule release).
-- **Phase 3**: cross-driver `matchAttribute` alignment (`pcieRoot`) with vendor drivers; health events (XID/DCGM → attribute flip / device taints); udev/netlink hot-attach triggering instead of periodic re-probe.
+- **Phase 3** (started): ~~standardized `resource.kubernetes.io/pcieRoot` attribute + `matchAttribute` alignment (scenario 11; cross-driver with vendor DRA drivers pending a mixed node)~~; health events (XID/DCGM → attribute flip / device taints); udev/netlink hot-attach triggering instead of periodic re-probe.
 - **Index as artifact**: extract `internal/index/data.json` into a versioned dataset other drivers can vendor.
 
 Design doc: *POC — llmfit as a DRA ResourceSlice Publisher* (Obsidian, sympozium vault).
