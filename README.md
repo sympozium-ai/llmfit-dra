@@ -11,24 +11,38 @@ from the device tree; capability is not. The probe walks `/sys/class/drm`,
 can't tell you — memory bandwidth, marketing name, unified-memory semantics.
 Everything else is a consumer of that join.
 
-**Phase 1: publish-only — done.** Devices are visible to the scheduler,
-Kueue, and controllers, and CEL allocation demonstrably works (scenario 4).
-**Phase 2 (in progress): claimable.** DeviceClasses now ship
-(`deploy/deviceclass.yaml`): `llmfit.ai` as the base class every claim
-targets, plus per-kind classes (`gpu.llmfit.ai`, `npu.llmfit.ai`,
-`cpu.llmfit.ai`) whose names give Kueue and ResourceQuota a countable
-vocabulary. Class selectors AND with claim selectors — the class guarantees
-an llmfit device of that kind, the claim adds the model-specific fit CEL.
-The kubelet DRA plugin (`internal/nodeplugin`) serves
-`NodePrepareResources`/`NodeUnprepareResources` and prepares allocated
-devices via CDI: one spec file per claim under `/var/run/cdi` injecting the
-device's `/dev` nodes (DRM render + card node, `/dev/kfd` for amdgpu,
-`/dev/accel/accelN` for NPUs) plus `LLMFIT_DEVICE` / `LLMFIT_DEVICE_KIND` /
-`LLMFIT_RENDER_NODE` env. `cpu0` prepares env-only, so the full
-claim→Running path is testable on clusters with no accelerator at all
-(scenario 6). The spec file doubles as prepare-state: restarts need no
-checkpoint, unprepare is "remove the file". Remaining for Phase 2:
-`llmfit claim <model>` generating fit CEL from the llmfit model database.
+## Status
+
+**Phase 1 — publish (done).** Devices are visible to the scheduler, Kueue,
+and controllers; CEL allocation works against our attributes.
+
+**Phase 2 — claimable (done).** The full path from model name to running
+pod, with zero Sympozium components:
+
+- **DeviceClasses** (`deploy/deviceclass.yaml`): `llmfit.ai` as the base
+  class every claim targets, plus per-kind classes (`gpu.llmfit.ai`,
+  `npu.llmfit.ai`, `cpu.llmfit.ai`) whose names give Kueue and
+  ResourceQuota a countable vocabulary. Class selectors AND with claim
+  selectors — the class guarantees an llmfit device of that kind, the
+  claim adds the model-specific fit CEL.
+- **Kubelet DRA plugin** (`internal/nodeplugin`): prepares allocated
+  devices via CDI — one spec file per claim under `/var/run/cdi` injecting
+  the device's `/dev` nodes (DRM render + card node, `/dev/kfd` for
+  amdgpu, `/dev/accel/accelN` for NPUs) and env: `LLMFIT_DEVICE`,
+  `LLMFIT_DEVICE_KIND`, `LLMFIT_RENDER_NODE`, plus per-device
+  `LLMFIT_DEVICE_<NAME>=<node>` (survives multi-device CDI merges).
+  `cpu0` prepares env-only, so the claim→Running loop works with no
+  accelerator at all. The spec file doubles as prepare-state: restarts
+  need no checkpoint, unprepare is "remove the file".
+- **`llmfit claim`** generates the fit CEL from the model database (see
+  below).
+
+**Phase 3 — alignment & liveness (in progress).** Shipped so far: the
+standardized `resource.kubernetes.io/pcieRoot` attribute + `matchAttribute`
+alignment (scenario 11), and honest health — `healthy` is computed per
+probe cycle (kernel driver bound, no uncorrectable RAS errors) with a
+`healthReason` attribute when false. Pending: event-driven health
+(XID/DCGM), device taints, udev/netlink hot-attach.
 
 **Stage two: the real llmfit is the capability source.** The image ships the
 llmfit binary (Rust); the DaemonSet runs privileged with host `/sys`, `/dev`
@@ -52,12 +66,14 @@ One ResourceSlice per node (pool = node name). Devices are named `gpu0…N`,
 | `model` | string | `Intel Arc Graphics 140V` (from index) |
 | `driver` | string | `xe`, `intel_vpu` |
 | `pciAddress` / `pcieRoot` | string | `0000:00:02.0` / `pci0000:00` — correlation keys to vendor DRA drivers |
+| `resource.kubernetes.io/pcieRoot` | string | same value, standardized spelling — enables cross-driver `constraints.matchAttribute` |
 | `memoryBandwidthGBs` | int | `136` — the number tok/s physics hangs off; **index-sourced, not OS-discoverable** |
 | `unifiedMemory` | bool | `true` on iGPUs/Apple-class devices |
 | `indexed` | bool | whether the capability index recognized the PCI ID |
 | `source` | string | capability provenance: `llmfit` \| `index` \| `probe` |
 | `backend` | string | llmfit inference backend: `Vulkan`, `CUDA`, `ROCm`, `SYCL`, `Metal` |
-| `healthy` | bool | placeholder `true` (XID/NVML event wiring is roadmap) |
+| `healthy` | bool | computed per probe cycle: kernel driver bound, no uncorrectable RAS errors |
+| `healthReason` | string | only when unhealthy: `driverUnbound` \| `uncorrectableEcc` |
 | capacity `memory` | quantity | VRAM, or system RAM when unified |
 
 Fit for a *specific* LLM is deliberately **not** published (models × devices
@@ -165,12 +181,16 @@ makes arm64 impractical; revisit with native arm64 runners.
 ## Layout
 
 ```
-cmd/llmfit-dra/       main: flags, kube client, probe loop
-internal/probe/       device tree walk (sysfs/procfs, root-parameterized for tests)
-internal/index/       embedded capability index (data.json)
-internal/publisher/   probe ⋈ index → resource.k8s.io/v1 Devices; resourceslice helper wiring
-deploy/               namespace, RBAC, DeviceClasses, DaemonSet
-hack/scenarios.sh     live-cluster scenarios (publish / shape / reconcile / CEL-consume)
+cmd/llmfit-dra/        main: flags, kube client, probe loop, plugin wiring
+internal/probe/        device tree walk (sysfs/procfs, root-parameterized for tests):
+                       identity, /dev nodes, driver binding, RAS health
+internal/index/        embedded capability index (data.json)
+internal/llmfit/       exec + parse `llmfit --json system` (capability source)
+internal/publisher/    probe ⋈ index ⋈ llmfit → resource.k8s.io/v1 Devices; resourceslice helper
+internal/nodeplugin/   kubelet DRA plugin: NodePrepareResources → CDI specs in /var/run/cdi
+deploy/                namespace, RBAC, DeviceClasses, DaemonSet
+hack/scenarios.sh      live-cluster scenario suite (see Scenarios)
+hack/scenarios-cpu.sh  the same suite forced through the cpu0-only path (reproduces CI)
 ```
 
 ## Quickstart (kind)
@@ -205,15 +225,16 @@ docker/kind daemon lives on another host (e.g. over tailscale).
 10. **Deployment** — the Phase 2 exit criterion verbatim: a vanilla Deployment consuming a `llmfit claim --template`-generated ResourceClaimTemplate lands on the fit device and runs; the per-pod claim is garbage-collected on delete.
 11. **Alignment** — one claim requests gpu + npu constrained by `matchAttribute: resource.kubernetes.io/pcieRoot`; both allocate and both prepare into one pod (multi-device CDI merge, per-device `LLMFIT_DEVICE_<NAME>` env).
 
-GPU-specific assertions self-skip on nodes without a `gpu0`, so the suite is
-identical on the dev rig and in CI. `make scenarios-cpu` reproduces the CI
-run on any cluster by hiding sysfs from the probe (cpu0-only inventory),
-restoring the DaemonSet afterwards.
+GPU-specific assertions self-skip on nodes without a **fit-capable** `gpu0`
+(one with a bandwidth attribute — virtual display adapters on CI runners
+don't count), so the suite is identical on the dev rig and in CI.
+`make scenarios-cpu` reproduces the CI run on any cluster by hiding sysfs
+from the probe (cpu0-only inventory), restoring the DaemonSet afterwards.
 
 ## Roadmap
 
-- **Phase 2 — complete**: shipped DeviceClasses, probe device-node capture, kubelet DRA plugin (`NodePrepareResources` → CDI), and the `llmfit claim <model>` generator (`llmfit claim <model> --min-tps N | kubectl apply -f -`). The generator ships in llmfit `v0.9.35` (the pinned submodule release).
-- **Phase 3** (started): ~~standardized `resource.kubernetes.io/pcieRoot` attribute + `matchAttribute` alignment (scenario 11; cross-driver with vendor DRA drivers pending a mixed node)~~; health events (XID/DCGM → attribute flip / device taints); udev/netlink hot-attach triggering instead of periodic re-probe.
+- **Phase 3** (in progress): done — standardized `pcieRoot` alignment (scenario 11), baseline health (`driverUnbound`/`uncorrectableEcc`). Pending — event-driven health (XID/DCGM watches), device taints for de-scheduling, udev/netlink hot-attach instead of the periodic re-probe, cross-driver `matchAttribute` against a vendor DRA driver (needs a mixed node).
 - **Index as artifact**: extract `internal/index/data.json` into a versioned dataset other drivers can vendor.
+- **Image base**: optionally consume llmfit's release image (`COPY --from`) instead of compiling the submodule — faster CI, at the cost of pinning an image digest rather than a source SHA.
 
 Design doc: *POC — llmfit as a DRA ResourceSlice Publisher* (Obsidian, sympozium vault).
