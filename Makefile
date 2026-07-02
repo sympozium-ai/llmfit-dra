@@ -90,10 +90,27 @@ helm-lint: ## Lint the Helm chart
 # GITHUB_TOKEN from the environment, falling back to `gh auth token`
 # (which needs `gh auth refresh -s read:packages`). The token travels via
 # the environment and stdin — never in process arguments.
+#
+# The scopeless `gh auth token` fallback silently writes a secret that
+# 403s on pull, so the token is VERIFIED against the real package before
+# any secret is written — a bad token fails loudly instead of producing a
+# broken ImagePullBackOff.
 GHCR_USER ?= AlexsJones
 PULL_SECRET_NAMESPACES ?= llmfit-dra sympozium-system
+GHCR_VERIFY_REPO ?= sympozium-ai/llmfit-dra
 pull-secret: export GHCR_TOKEN := $(or $(GITHUB_TOKEN),$(shell gh auth token))
 pull-secret: ## Create/refresh the ghcr-pull secret (token via env/stdin)
+	@if [ -z "$$GHCR_TOKEN" ]; then echo "ERROR: no token (set GITHUB_TOKEN or run 'gh auth login')" >&2; exit 1; fi
+	@bearer=$$(curl -sf -u "$(GHCR_USER):$$GHCR_TOKEN" \
+	    "https://ghcr.io/token?scope=repository:$(GHCR_VERIFY_REPO):pull&service=ghcr.io" | \
+	    sed -n 's/.*"token":"\([^"]*\)".*/\1/p'); \
+	  code=$$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $$bearer" \
+	    "https://ghcr.io/v2/$(GHCR_VERIFY_REPO)/tags/list"); \
+	  if [ "$$code" != "200" ]; then \
+	    echo "ERROR: token cannot read $(GHCR_VERIFY_REPO) (HTTP $$code) — needs read:packages." >&2; \
+	    echo "       'gh auth token' lacks it; export GITHUB_TOKEN or 'gh auth refresh -s read:packages'." >&2; \
+	    exit 1; \
+	  fi
 	@for ns in $(PULL_SECRET_NAMESPACES); do \
 	  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
 	    "$$(printf '%s:%s' '$(GHCR_USER)' "$$GHCR_TOKEN" | base64 -w0)" | \
