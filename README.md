@@ -131,15 +131,5 @@ make help                   # everything else
   release PR tags `vX.Y.Z`, builds the matching image, and publishes the
   chart to `oci://ghcr.io/sympozium-ai/charts/llmfit-dra`.
 
-## Status & roadmap
-
-Validated end-to-end on AMD (Strix Halo APU + XDNA NPU) and in CPU-only CI,
-including real Vulkan compute in a claimed pod; hardened by an adversarial
-readiness audit (`docs/readiness-audit-2026-07-02.json`). On NVIDIA/Neuron
-nodes the driver deliberately defers allocation to the vendor's DRA driver
-(coexistence above). Next: evidence on a second vendor's silicon, live
-cross-driver `matchAttribute`, and extracting the capability index as a
-standalone dataset.
-
 Design doc: *POC — llmfit as a DRA ResourceSlice Publisher* (Obsidian,
 sympozium vault).
