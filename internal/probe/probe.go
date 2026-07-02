@@ -33,8 +33,10 @@ type Device struct {
 	PCIeRoot  string // e.g. "pci0000:00"
 	Driver    string // kernel driver, e.g. "xe", "intel_vpu"
 
-	// VRAMBytes is dedicated device memory. 0 means none detected —
-	// the device shares system RAM (unified memory).
+	// VRAMBytes is dedicated device memory as read from driver-specific
+	// sysfs (see vramBytes). 0 means none DETECTED — true for unified
+	// iGPUs but also for drivers that expose no VRAM file (NVIDIA
+	// proprietary), so 0 must not be read as "unified".
 	VRAMBytes uint64
 
 	// DevNode is the primary /dev path, named by devtmpfs convention from
@@ -85,11 +87,6 @@ func (d Device) Name() string {
 		return string(d.Kind) + "-" + strings.NewReplacer(":", "-", ".", "-").Replace(d.PCIAddr)
 	}
 	return fmt.Sprintf("%s%d", d.Kind, d.Index)
-}
-
-// UnifiedMemory reports whether the device shares system RAM.
-func (d Device) UnifiedMemory() bool {
-	return d.Kind != KindCPU && d.VRAMBytes == 0
 }
 
 // Prober walks a sysfs/procfs tree. Roots are parameterized for tests and for
@@ -171,7 +168,7 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 			PCIVendor: readHexID(filepath.Join(devDir, "vendor")),
 			PCIDevice: readHexID(filepath.Join(devDir, "device")),
 			Driver:    readLinkBase(filepath.Join(devDir, "driver")),
-			VRAMBytes: readUint(filepath.Join(devDir, "mem_info_vram_total")),
+			VRAMBytes: vramBytes(classDir, e.Name()),
 
 			RASUncorrectable: readUint(filepath.Join(devDir, "ras", "ue_count")),
 		}
@@ -206,6 +203,27 @@ func (p *Prober) cpuDevice() (Device, error) {
 // unified-memory devices.
 func (p *Prober) MemTotalBytes() (uint64, error) {
 	return memTotalBytes(filepath.Join(p.ProcRoot, "meminfo"))
+}
+
+// vramBytes reads dedicated device memory from the driver-specific sysfs
+// location: amdgpu's mem_info_vram_total (device dir), i915's
+// lmem_total_bytes (card dir, discrete only), or xe's per-tile
+// physical_vram_size_bytes. 0 means no dedicated VRAM was DETECTED — which
+// is what unified-memory iGPUs and NVIDIA's proprietary driver (no sysfs
+// VRAM file at all) both look like, so 0 must never be interpreted as
+// "unified"; only as "unknown here".
+func vramBytes(classDir, entry string) uint64 {
+	devDir := filepath.Join(classDir, entry, "device")
+	for _, p := range []string{
+		filepath.Join(devDir, "mem_info_vram_total"),               // amdgpu
+		filepath.Join(classDir, entry, "lmem_total_bytes"),         // i915 dGPU
+		filepath.Join(devDir, "tile0", "physical_vram_size_bytes"), // xe dGPU
+	} {
+		if v := readUint(p); v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // renderNode pairs a DRM card with its render node. The device dir's drm/

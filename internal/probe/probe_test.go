@@ -92,8 +92,8 @@ func TestWalk(t *testing.T) {
 	if igpu.Driver != "xe" {
 		t.Errorf("gpu-0000-00-02-0 driver = %q, want xe", igpu.Driver)
 	}
-	if !igpu.UnifiedMemory() {
-		t.Error("gpu-0000-00-02-0 should be unified memory (no VRAM file)")
+	if igpu.VRAMBytes != 0 {
+		t.Errorf("iGPU should detect no dedicated VRAM, got %d", igpu.VRAMBytes)
 	}
 	if igpu.PCIAddr != "0000:00:02.0" || igpu.PCIeRoot != "pci0000:00" {
 		t.Errorf("gpu-0000-00-02-0 pci = %s / %s, want 0000:00:02.0 / pci0000:00", igpu.PCIAddr, igpu.PCIeRoot)
@@ -105,9 +105,6 @@ func TestWalk(t *testing.T) {
 	dgpu, ok := byName["gpu-0000-01-00-0"]
 	if !ok {
 		t.Fatal("gpu-0000-01-00-0 missing")
-	}
-	if dgpu.UnifiedMemory() {
-		t.Error("gpu-0000-01-00-0 has VRAM; should not be unified")
 	}
 	if dgpu.VRAMBytes != 25753026560 {
 		t.Errorf("gpu-0000-01-00-0 vram = %d, want 25753026560", dgpu.VRAMBytes)
@@ -302,4 +299,33 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestVRAMFromIntelLmem(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	// Intel discrete (i915): lmem_total_bytes lives in the CARD dir.
+	realDev := filepath.Join(sysRoot, "devices", "pci0000:00", "0000:03:00.0")
+	mustMkdir(t, filepath.Join(realDev, "drm", "card3"))
+	mustWrite(t, filepath.Join(realDev, "vendor"), "0x8086\n")
+	mustWrite(t, filepath.Join(realDev, "device"), "0x56a0\n")
+	classEntry := filepath.Join(sysRoot, "class", "drm", "card3")
+	mustMkdir(t, classEntry)
+	if err := os.Symlink(realDev, filepath.Join(classEntry, "device")); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(classEntry, "lmem_total_bytes"), "17179869184\n")
+
+	devices, err := New(sysRoot, procRoot).Walk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range devices {
+		if d.Name() == "gpu-0000-03-00-0" {
+			if d.VRAMBytes != 17179869184 {
+				t.Errorf("i915 lmem vram = %d, want 17179869184", d.VRAMBytes)
+			}
+			return
+		}
+	}
+	t.Fatal("intel dGPU missing")
 }

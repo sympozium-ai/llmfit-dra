@@ -298,3 +298,34 @@ func TestBuildDevicesNoTaintsByDefault(t *testing.T) {
 		t.Errorf("taints published without opt-in: %+v", devices[0].Taints)
 	}
 }
+
+func TestBuildDevicesUnknownDiscreteGetsNoCapacity(t *testing.T) {
+	// An unindexed GPU with no readable VRAM (what NVIDIA's proprietary
+	// driver looks like to sysfs): publishing system RAM as its capacity
+	// would place models onto a card that cannot hold them.
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "10de", PCIDevice: "9999", PCIAddr: "0000:41:00.0", Driver: "nvidia"},
+	}, mustIndex(t), systemRAM, nil, Options{})
+	d := devices[0]
+	if _, ok := d.Capacity["memory"]; ok {
+		t.Errorf("unknown discrete GPU must publish no memory capacity, got %v", d.Capacity)
+	}
+	if _, ok := d.Attributes["unifiedMemory"]; ok {
+		t.Error("unifiedMemory must be omitted when no source knows it")
+	}
+}
+
+func TestMatchLLMFitGPURefusesAmbiguity(t *testing.T) {
+	bw1, bw2 := 1008.0, 256.0
+	sys := &llmfit.System{HasGPU: true, GPUs: []llmfit.GPU{
+		{Name: "AMD Radeon RX 7900 XTX", Backend: "ROCm", Count: 1, MemoryBandwidthGBps: &bw1},
+		{Name: "AMD Radeon 8060S (Strix Halo)", Backend: "Vulkan", Count: 1, MemoryBandwidthGBps: &bw2},
+	}}
+	// Two distinct same-vendor models: vendor pairing cannot tell which
+	// probed card is which — must fall back to the per-PCI-ID index.
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "744c", PCIAddr: "0000:01:00.0", Driver: "amdgpu", VRAMBytes: 24 << 30},
+	}, mustIndex(t), systemRAM, sys, Options{})
+	assertStr(t, devices[0].Attributes, "source", "index")
+	assertStr(t, devices[0].Attributes, "model", "AMD Radeon RX 7900 XTX")
+}

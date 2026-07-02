@@ -89,6 +89,10 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			}
 
 			// Capability, best source first: llmfit → index → probe.
+			// unified stays nil when no source KNOWS: "the probe found no
+			// VRAM file" is what NVIDIA's proprietary driver looks like too,
+			// so it must not imply unified memory.
+			var unified *bool
 			lf := matchLLMFitGPU(sys, d, vendor)
 			entry, found := idx.Lookup(d.PCIVendor, d.PCIDevice)
 			attrs["indexed"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(found)}
@@ -108,7 +112,7 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 					// name). The PCI-ID index still can.
 					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.MemoryBandwidthGBs)}
 				}
-				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(lf.UnifiedMemory)}
+				unified = ptr.To(lf.UnifiedMemory)
 				// llmfit's vram_gb is the fit budget (for APUs it already
 				// resolves to the shared pool).
 				if lf.VRAMGB != nil && *lf.VRAMGB > 0 {
@@ -120,18 +124,28 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 				if entry.MemoryBandwidthGBs > 0 {
 					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.MemoryBandwidthGBs)}
 				}
-				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(d.UnifiedMemory() || entry.UnifiedMemory)}
+				unified = ptr.To(entry.UnifiedMemory)
 			default:
 				attrs["source"] = resourceapi.DeviceAttribute{StringValue: ptr.To("probe")}
 				attrs["model"] = resourceapi.DeviceAttribute{StringValue: ptr.To(truncate(fmt.Sprintf("pci-%s-%s", d.PCIVendor, d.PCIDevice), 64))}
-				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(d.UnifiedMemory())}
+				if d.VRAMBytes > 0 {
+					unified = ptr.To(false) // dedicated VRAM measured: definitely discrete
+				}
+			}
+			if unified != nil {
+				attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: unified}
 			}
 
-			// Probe-detected VRAM carve-outs win when llmfit had no number.
+			// Capacity is only published when we actually know it: a probed
+			// VRAM carve-out, or the shared pool on a KNOWN unified device.
+			// An unknown discrete card (NVIDIA proprietary, unprobed Intel
+			// dGPU) gets NO capacity — advertising system RAM as VRAM places
+			// models onto cards that cannot hold them.
 			if memBytes == 0 {
-				if d.VRAMBytes > 0 {
+				switch {
+				case d.VRAMBytes > 0:
 					memBytes = d.VRAMBytes
-				} else {
+				case unified != nil && *unified:
 					memBytes = systemRAM
 				}
 			}
@@ -159,16 +173,28 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 }
 
 // matchLLMFitGPU pairs a probed GPU with an llmfit-reported GPU by vendor.
-// llmfit groups identical models (count > 1), so one llmfit entry may serve
-// several probed cards of the same vendor.
+// llmfit groups IDENTICAL models into one entry (count > 1), so a single
+// same-vendor entry legitimately serves several probed cards. Two or more
+// same-vendor entries mean different models — vendor alone cannot say which
+// probed card is which, and guessing applies the first card's bandwidth and
+// memory to all of them. Ambiguity returns nil: the per-PCI-ID index gives
+// each card its own correct numbers instead. (Per-instance pairing needs
+// llmfit to report PCI identity — tracked upstream.)
 func matchLLMFitGPU(sys *llmfit.System, d probe.Device, vendor string) *llmfit.GPU {
 	if sys == nil || d.Kind != probe.KindGPU {
 		return nil
 	}
+	var match *llmfit.GPU
 	for i := range sys.GPUs {
 		if llmfit.VendorOf(sys.GPUs[i]) == vendor {
-			return &sys.GPUs[i]
+			if match != nil {
+				return nil // ambiguous: multiple distinct same-vendor models
+			}
+			match = &sys.GPUs[i]
 		}
+	}
+	if match != nil {
+		return match
 	}
 	// Single GPU on both sides: trust the pairing even if the vendor
 	// heuristic can't classify the llmfit name.
