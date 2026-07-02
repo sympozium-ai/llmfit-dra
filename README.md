@@ -225,24 +225,44 @@ internal/index/        embedded capability index (data.json)
 internal/llmfit/       exec + parse `llmfit --json system` (capability source)
 internal/publisher/    probe ⋈ index ⋈ llmfit → resource.k8s.io/v1 Devices; resourceslice helper
 internal/nodeplugin/   kubelet DRA plugin: NodePrepareResources → CDI specs in /var/run/cdi
-deploy/                namespace, RBAC, DeviceClasses, DaemonSet
+charts/llmfit-dra/     Helm chart (the recommended install path; CI e2e uses it)
+deploy/                raw manifests: namespace, RBAC, admission policy, DeviceClasses, DaemonSet
 hack/scenarios.sh      live-cluster scenario suite (see Scenarios)
 hack/scenarios-cpu.sh  the same suite forced through the cpu0-only path (reproduces CI)
 ```
 
-## Quickstart (kind)
+## Install (Helm)
 
 Requires Kubernetes ≥ 1.34 (DRA GA). Tested on kind + v1.35.
 
 ```sh
-git clone --recurse-submodules git@github.com:sympozium-ai/llmfit-dra.git
-make test                        # unit tests
-make kind-load KIND_CLUSTER=tailnet   # kind on this machine…
-make sideload                         # …or remote kind reachable only via kubectl
-make deploy
+# The GHCR package is private for now: create the pull secret first
+# (GITHUB_TOKEN with read:packages) — `make pull-secret` does this.
+helm install llmfit-dra charts/llmfit-dra -n llmfit-dra --create-namespace
 kubectl get resourceslices -o yaml   # inspect the published inventory
-make scenarios                   # end-to-end assertions
 ```
+
+Everything is a value: image/tag, probe interval, `kubeletPlugin` (false =
+publish-only), `vendorDrivers` coexistence list, `publishTaints`,
+`deviceClasses.enabled`, `admissionPolicy.enabled`, tolerations/priority.
+CI installs through this chart, so it is continuously e2e-tested.
+
+## Developing (kind)
+
+```sh
+git clone --recurse-submodules git@github.com:sympozium-ai/llmfit-dra.git
+make test                          # unit tests
+make deploy-local TAG=dev          # build + sideload + helm install the local image
+make scenarios                     # end-to-end assertions
+make help                          # everything else (kind-reload, scenarios-cpu, …)
+```
+
+`make deploy-local` is the whole dev loop: builds `$(REGISTRY):$(TAG)` from
+the working tree (llmfit submodule included), streams it into the kind node,
+and helm-installs pinned to that tag. Releases are cut by **release-please**
+(conventional commits on `main` → release PR → merging tags `vX.Y.Z`), which
+bumps the chart's `version`/`appVersion`; CI then pushes the matching image
+tag and publishes the chart to `oci://ghcr.io/sympozium-ai/charts/llmfit-dra`.
 
 `make sideload` streams `docker save` through a temporary privileged pod into
 the node's containerd (`ctr -n k8s.io images import`) — for clusters whose

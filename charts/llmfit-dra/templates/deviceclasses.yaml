@@ -1,0 +1,58 @@
+{{- if .Values.deviceClasses.enabled }}
+# The base and gpu classes exclude vendorManaged devices: when a vendor DRA
+# driver owns this node's GPUs, allocating the same silicon through llmfit
+# too would double-book it. A custom class WITHOUT the exclusion deliberately
+# re-enables the fitness-companion matchAttribute pattern.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: llmfit.ai
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          !('vendorManaged' in device.attributes["llmfit.ai"])
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.llmfit.ai
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "gpu" &&
+          !('vendorManaged' in device.attributes["llmfit.ai"])
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: npu.llmfit.ai
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "npu"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: cpu.llmfit.ai
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "cpu"
+{{- end }}

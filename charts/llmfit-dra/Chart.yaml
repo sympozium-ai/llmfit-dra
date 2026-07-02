@@ -1,0 +1,18 @@
+apiVersion: v2
+name: llmfit-dra
+description: >-
+  Kubernetes DRA driver publishing per-node accelerator inventory (probe ⋈
+  llmfit capability assessment) as ResourceSlices under the llmfit.ai driver,
+  with a kubelet plugin preparing allocated devices via CDI.
+type: application
+# Both versions are managed by release-please (conventional commits on main
+# open a release PR; merging it tags vX.Y.Z, which CI builds as the image
+# tag X.Y.Z that appVersion — and therefore the default image.tag — points
+# at).
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
+home: https://github.com/sympozium-ai/llmfit-dra
+sources:
+  - https://github.com/sympozium-ai/llmfit-dra
+kubeVersion: ">=1.34.0-0"
+keywords: [dra, gpu, npu, llm, scheduling]

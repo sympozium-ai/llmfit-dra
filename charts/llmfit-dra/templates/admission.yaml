@@ -1,0 +1,43 @@
+{{- if .Values.admissionPolicy.enabled }}
+# Scope the driver ServiceAccount's ResourceSlice writes to its own node.
+# Kubelet-issued bound tokens carry the pod's node in userInfo extra
+# (authentication.kubernetes.io/node-name, K8s >= 1.30); every write by the
+# driver SA must be (a) for the llmfit.ai driver and (b) for the node the
+# writing pod actually runs on.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}-slice-scope
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["resource.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["resourceslices"]
+  matchConditions:
+    - name: only-the-driver-sa
+      expression: request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:{{ include "llmfit-dra.serviceAccountName" . }}'
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).spec.driver == 'llmfit.ai'
+      message: the llmfit-dra ServiceAccount may only manage llmfit.ai ResourceSlices
+    - expression: >-
+        ('authentication.kubernetes.io/node-name' in request.userInfo.extra) &&
+        (request.operation == 'DELETE' ? oldObject : object).spec.nodeName ==
+          request.userInfo.extra['authentication.kubernetes.io/node-name'][0]
+      message: the llmfit-dra ServiceAccount may only manage ResourceSlices for its own node
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}-slice-scope
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "llmfit-dra.fullname" . }}-slice-scope
+  validationActions: ["Deny"]
+{{- end }}

@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "llmfit-dra.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "llmfit-dra.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "llmfit-dra.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # The uevent netlink socket is network-namespace scoped: hostNetwork is
+      # what lets the hot-attach listener see host device events. It is the
+      # only host namespace the driver needs — no hostPID, no privileged.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: llmfit-dra
+          image: {{ include "llmfit-dra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --probe-interval={{ .Values.probeInterval }}
+            - --v={{ .Values.logVerbosity }}
+            - --kubelet-plugin={{ .Values.kubeletPlugin }}
+            - --cdi-dir={{ .Values.cdiDir }}
+            - --vendor-drivers={{ .Values.vendorDrivers }}
+            {{- if .Values.publishTaints }}
+            - --publish-taints
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"] # uevent netlink subscribe
+          volumeMounts:
+            - name: sysfs
+              mountPath: /sys
+              readOnly: true
+            - name: dev
+              mountPath: /dev
+            - name: plugins
+              mountPath: /var/lib/kubelet/plugins
+            - name: plugins-registry
+              mountPath: /var/lib/kubelet/plugins_registry
+            - name: cdi
+              mountPath: {{ .Values.cdiDir }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: sysfs
+          hostPath:
+            path: /sys
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: plugins
+          hostPath:
+            path: /var/lib/kubelet/plugins
+            type: Directory
+        - name: plugins-registry
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: cdi
+          hostPath:
+            path: {{ .Values.cdiDir }}
+            type: DirectoryOrCreate

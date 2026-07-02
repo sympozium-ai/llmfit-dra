@@ -1,0 +1,23 @@
+llmfit-dra {{ .Chart.Version }} installed (driver llmfit.ai, image {{ include "llmfit-dra.image" . }}).
+
+Inspect the published accelerator inventory:
+
+  kubectl get resourceslices -o yaml
+
+Generate a fit claim from the model database and run against the best device
+(the llmfit binary ships in the driver image):
+
+  kubectl -n {{ .Release.Namespace }} exec ds/{{ include "llmfit-dra.name" . }} -- \
+    llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -
+
+{{- if not .Values.deviceClasses.enabled }}
+
+NOTE: deviceClasses.enabled=false — nothing can claim llmfit.ai devices
+until you install DeviceClasses yourself.
+{{- end }}
+{{- if .Values.imagePullSecrets }}
+
+NOTE: the image pull secret(s) {{ join ", " .Values.imagePullSecrets }} must
+exist in {{ .Release.Namespace }} (the GHCR package is private; see
+`make pull-secret` in the repo).
+{{- end }}

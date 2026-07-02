@@ -1,0 +1,51 @@
+image:
+  repository: ghcr.io/sympozium-ai/llmfit-dra
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: Always
+
+# Names of pre-created dockerconfigjson secrets in the release namespace
+# (the GHCR package is currently private — see `make pull-secret`).
+imagePullSecrets:
+  - ghcr-pull
+
+# Driver flags.
+probeInterval: 30s
+logVerbosity: 2
+# Serve the kubelet DRA plugin (NodePrepareResources → CDI). Disable for a
+# publish-only (inventory) deployment.
+kubeletPlugin: true
+cdiDir: /var/run/cdi
+# Taint unhealthy devices NoSchedule — requires the alpha DRADeviceTaints
+# feature gate on the cluster.
+publishTaints: false
+# Vendor DRA drivers whose presence on a node demotes our GPUs to
+# fitness-only (empty string disables coexistence demotion).
+vendorDrivers: "gpu.nvidia.com,gpu.intel.com,neuron.amazonaws.com"
+
+# Ship the llmfit.ai DeviceClasses (base + per-kind). Disable only if you
+# manage classes out-of-band.
+deviceClasses:
+  enabled: true
+
+# ValidatingAdmissionPolicy pinning this driver's ResourceSlice writes to
+# the writing pod's own node (needs bound SA tokens with node claims,
+# K8s >= 1.30).
+admissionPolicy:
+  enabled: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+priorityClassName: system-node-critical
+tolerations:
+  - operator: Exists
+nodeSelector: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
