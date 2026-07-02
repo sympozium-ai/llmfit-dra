@@ -117,6 +117,9 @@ make help                   # everything else
   `internal/publisher` joins probe ⋈ index ⋈ llmfit into ResourceSlices;
   `internal/nodeplugin` serves the kubelet DRA plugin (CDI); llmfit is a
   git submodule pinned to a release tag and built into the image.
+  **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has the full picture —
+  the two planes, the capability-source chain, device identity, coexistence,
+  and the security model, with diagrams.
 - CI runs unit tests (`-race`), lints the chart, and helm-installs onto a
   3-node kind cluster for the full scenario suite (GPU assertions self-skip
   there; `make scenarios-cpu` reproduces that mode on any cluster).
