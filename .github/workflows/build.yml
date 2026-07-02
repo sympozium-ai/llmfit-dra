@@ -28,6 +28,50 @@ jobs:
       - name: Unit tests
         run: go test ./...
 
+  # Full DRA path on a GPU-less kind cluster: publish → CEL allocation →
+  # kubelet plugin prepare (CDI) → pod Running, via the cpu0 fallback device.
+  # hack/scenarios.sh skips its GPU-specific assertions when no gpu0 exists.
+  e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:e2e
+          cache-from: type=gha
+      - name: Create kind cluster (K8s ≥ 1.34 for DRA GA)
+        uses: helm/kind-action@v1
+        with:
+          node_image: kindest/node:v1.35.0
+          cluster_name: e2e
+      - name: Load image
+        run: kind load docker-image ${{ env.IMAGE }}:e2e --name e2e
+      - name: Deploy
+        run: |
+          kubectl apply -f deploy/rbac.yaml -f deploy/deviceclass.yaml -f deploy/daemonset.yaml
+          kubectl -n llmfit-dra patch daemonset llmfit-dra --type=json -p='[
+            {"op":"replace","path":"/spec/template/spec/containers/0/image","value":"${{ env.IMAGE }}:e2e"},
+            {"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"},
+            {"op":"remove","path":"/spec/template/spec/imagePullSecrets"}]'
+      - name: Scenarios
+        run: ./hack/scenarios.sh
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl -n llmfit-dra get pods -o wide || true
+          kubectl -n llmfit-dra logs daemonset/llmfit-dra --tail=100 || true
+          kubectl get resourceslices -o yaml || true
+          kubectl describe pod llmfit-consumer llmfit-cpu-consumer 2>/dev/null || true
+
   image:
     needs: test
     runs-on: ubuntu-latest

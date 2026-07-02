@@ -34,13 +34,35 @@ sideload: image
 	  nsenter -t 1 -m -- ctr -n k8s.io images import -
 	kubectl -n kube-system delete pod image-loader --wait=false
 
+# Create/refresh the GHCR pull secret in every namespace that pulls
+# private sympozium-ai images. Requires a token with read:packages:
+# GITHUB_TOKEN from the environment, falling back to `gh auth token`
+# (which needs `gh auth refresh -s read:packages`).
+GHCR_USER ?= AlexsJones
+GHCR_TOKEN ?= $(or $(GITHUB_TOKEN),$(shell gh auth token))
+PULL_SECRET_NAMESPACES ?= llmfit-dra sympozium-system
+pull-secret:
+	@for ns in $(PULL_SECRET_NAMESPACES); do \
+	  kubectl create secret docker-registry ghcr-pull \
+	    --docker-server=ghcr.io \
+	    --docker-username=$(GHCR_USER) \
+	    --docker-password=$(GHCR_TOKEN) \
+	    -n $$ns --dry-run=client -o yaml | kubectl apply -f -; \
+	done
+
 deploy:
 	kubectl apply -f deploy/rbac.yaml
+	kubectl apply -f deploy/deviceclass.yaml
 	kubectl apply -f deploy/daemonset.yaml
 
 undeploy:
 	kubectl delete -f deploy/daemonset.yaml --ignore-not-found
+	kubectl delete -f deploy/deviceclass.yaml --ignore-not-found
 	kubectl delete -f deploy/rbac.yaml --ignore-not-found
 
 scenarios:
 	./hack/scenarios.sh
+
+# The CI run, reproduced locally: probe sees no sysfs → cpu0-only inventory.
+scenarios-cpu:
+	./hack/scenarios-cpu.sh
