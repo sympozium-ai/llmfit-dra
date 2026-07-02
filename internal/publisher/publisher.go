@@ -1,8 +1,8 @@
 // Package publisher converts probed+indexed devices into DRA ResourceSlices
 // and keeps them synchronized via the upstream resourceslice helper
-// controller. Publish-only (Phase 1): there is no kubelet plugin and no
-// DeviceClass, so devices are visible to schedulers and controllers but not
-// yet claimable end-to-end.
+// controller. DeviceClasses ship in deploy/deviceclass.yaml, so claims
+// allocate against these devices; the kubelet plugin (NodePrepareResources →
+// CDI) is the remaining Phase 2 piece before pods can run against claims.
 package publisher
 
 import (

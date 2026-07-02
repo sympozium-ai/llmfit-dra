@@ -1,0 +1,51 @@
+# Shipped DeviceClasses — the claim vocabulary for llmfit.ai devices.
+#
+# A DeviceClass is the mandatory entry point of every DRA request
+# (exactly.deviceClassName), and its selectors AND with claim-level
+# selectors: the class guarantees "an llmfit device (of this kind)", the
+# claim adds the model-specific fit inequality (`llmfit claim` generates
+# it from the model database). Deliberately no fit-tier classes — fit is
+# claim-time physics, not class vocabulary (Tenet 3). The kind classes
+# exist because Kueue and ResourceQuota count requests by class name,
+# making device kind a quota/admission dimension for free.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "llmfit.ai"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "gpu"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: npu.llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "npu"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: cpu.llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "cpu"
