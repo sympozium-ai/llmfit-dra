@@ -1,0 +1,245 @@
+// Package probe walks the local device tree (sysfs + procfs) and produces a
+// normalized inventory of accelerators. It is the "probe" half of llmfit's
+// probe ⋈ index model: identity comes from here, capability comes from the
+// index package.
+package probe
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Kind classifies a detected device.
+type Kind string
+
+const (
+	KindGPU Kind = "gpu"
+	KindNPU Kind = "npu"
+	KindCPU Kind = "cpu"
+)
+
+// Device is one normalized entry from the device tree walk.
+type Device struct {
+	Kind      Kind
+	Index     int
+	PCIVendor string // e.g. "8086" (no 0x prefix)
+	PCIDevice string // e.g. "64a0"
+	PCIAddr   string // e.g. "0000:00:02.0"
+	PCIeRoot  string // e.g. "pci0000:00"
+	Driver    string // kernel driver, e.g. "xe", "intel_vpu"
+
+	// VRAMBytes is dedicated device memory. 0 means none detected —
+	// the device shares system RAM (unified memory).
+	VRAMBytes uint64
+
+	// CPUModel and SystemRAMBytes are set on the CPU fallback device.
+	CPUModel       string
+	SystemRAMBytes uint64
+}
+
+// Name returns the stable DNS-label device name, e.g. "gpu0".
+func (d Device) Name() string {
+	return fmt.Sprintf("%s%d", d.Kind, d.Index)
+}
+
+// UnifiedMemory reports whether the device shares system RAM.
+func (d Device) UnifiedMemory() bool {
+	return d.Kind != KindCPU && d.VRAMBytes == 0
+}
+
+// Prober walks a sysfs/procfs tree. Roots are parameterized for tests and for
+// containers that mount the host tree somewhere other than /.
+type Prober struct {
+	SysRoot  string // usually "/sys", or "/host/sys" in a container
+	ProcRoot string // usually "/proc"
+}
+
+func New(sysRoot, procRoot string) *Prober {
+	if sysRoot == "" {
+		sysRoot = "/sys"
+	}
+	if procRoot == "" {
+		procRoot = "/proc"
+	}
+	return &Prober{SysRoot: sysRoot, ProcRoot: procRoot}
+}
+
+// Walk enumerates GPUs (/sys/class/drm), NPUs (/sys/class/accel) and the CPU
+// fallback device. The result is sorted by kind then index so consecutive
+// walks of unchanged hardware compare deep-equal.
+func (p *Prober) Walk() ([]Device, error) {
+	var devices []Device
+
+	gpus, err := p.walkClass(filepath.Join(p.SysRoot, "class", "drm"), "card", KindGPU)
+	if err != nil {
+		return nil, fmt.Errorf("walking drm class: %w", err)
+	}
+	devices = append(devices, gpus...)
+
+	npus, err := p.walkClass(filepath.Join(p.SysRoot, "class", "accel"), "accel", KindNPU)
+	if err != nil {
+		return nil, fmt.Errorf("walking accel class: %w", err)
+	}
+	devices = append(devices, npus...)
+
+	cpu, err := p.cpuDevice()
+	if err != nil {
+		return nil, fmt.Errorf("probing cpu: %w", err)
+	}
+	devices = append(devices, cpu)
+
+	sort.Slice(devices, func(i, j int) bool {
+		if devices[i].Kind != devices[j].Kind {
+			return devices[i].Kind < devices[j].Kind
+		}
+		return devices[i].Index < devices[j].Index
+	})
+	return devices, nil
+}
+
+// walkClass enumerates entries like card0, accel0 under a /sys/class dir.
+// Connector entries (card0-eDP-1) and render nodes are skipped by requiring
+// the suffix after the prefix to be purely numeric.
+func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error) {
+	entries, err := os.ReadDir(classDir)
+	if os.IsNotExist(err) {
+		return nil, nil // class absent on this kernel — not an error
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var out []Device
+	idx := 0
+	for _, e := range entries {
+		suffix, ok := strings.CutPrefix(e.Name(), prefix)
+		if !ok {
+			continue
+		}
+		if _, err := strconv.Atoi(suffix); err != nil {
+			continue
+		}
+		devDir := filepath.Join(classDir, e.Name(), "device")
+		d := Device{
+			Kind:      kind,
+			Index:     idx,
+			PCIVendor: readHexID(filepath.Join(devDir, "vendor")),
+			PCIDevice: readHexID(filepath.Join(devDir, "device")),
+			Driver:    readLinkBase(filepath.Join(devDir, "driver")),
+			VRAMBytes: readUint(filepath.Join(devDir, "mem_info_vram_total")),
+		}
+		d.PCIAddr, d.PCIeRoot = pciAddress(devDir)
+		out = append(out, d)
+		idx++
+	}
+	return out, nil
+}
+
+func (p *Prober) cpuDevice() (Device, error) {
+	ram, err := memTotalBytes(filepath.Join(p.ProcRoot, "meminfo"))
+	if err != nil {
+		return Device{}, err
+	}
+	return Device{
+		Kind:           KindCPU,
+		Index:          0,
+		CPUModel:       cpuModel(filepath.Join(p.ProcRoot, "cpuinfo")),
+		SystemRAMBytes: ram,
+	}, nil
+}
+
+// MemTotalBytes exposes system RAM for callers that need it to size
+// unified-memory devices.
+func (p *Prober) MemTotalBytes() (uint64, error) {
+	return memTotalBytes(filepath.Join(p.ProcRoot, "meminfo"))
+}
+
+func readHexID(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(b)), "0x")
+}
+
+func readLinkBase(path string) string {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(target)
+}
+
+func readUint(path string) uint64 {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// pciAddress resolves the device dir to its PCI address and root complex,
+// e.g. ("0000:00:02.0", "pci0000:00").
+func pciAddress(devDir string) (addr, root string) {
+	resolved, err := filepath.EvalSymlinks(devDir)
+	if err != nil {
+		return "", ""
+	}
+	for _, part := range strings.Split(resolved, string(filepath.Separator)) {
+		if strings.HasPrefix(part, "pci") && strings.Contains(part, ":") {
+			root = part
+		}
+		// PCI addresses look like 0000:00:02.0
+		if len(part) == 12 && part[4] == ':' && part[7] == ':' && part[10] == '.' {
+			addr = part
+		}
+	}
+	return addr, root
+}
+
+func memTotalBytes(meminfoPath string) (uint64, error) {
+	f, err := os.Open(meminfoPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) >= 2 && fields[0] == "MemTotal:" {
+			kb, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			return kb * 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("MemTotal not found in %s", meminfoPath)
+}
+
+func cpuModel(cpuinfoPath string) string {
+	f, err := os.Open(cpuinfoPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "model name") {
+			if _, val, ok := strings.Cut(line, ":"); ok {
+				return strings.TrimSpace(val)
+			}
+		}
+	}
+	return ""
+}

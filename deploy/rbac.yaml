@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llmfit-dra
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llmfit-dra
+  namespace: llmfit-dra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: llmfit-dra
+rules:
+  # Publish and reconcile our inventory.
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The helper controller resolves the owning node's UID.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llmfit-dra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llmfit-dra
+subjects:
+  - kind: ServiceAccount
+    name: llmfit-dra
+    namespace: llmfit-dra

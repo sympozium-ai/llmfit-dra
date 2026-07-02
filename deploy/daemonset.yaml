@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: llmfit-dra
+  namespace: llmfit-dra
+  labels:
+    app.kubernetes.io/name: llmfit-dra
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llmfit-dra
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llmfit-dra
+    spec:
+      serviceAccountName: llmfit-dra
+      # Stage two: full host access. llmfit assesses the node exactly as it
+      # would when run natively — real /sys, real /dev, host PID namespace.
+      hostPID: true
+      containers:
+        - name: llmfit-dra
+          image: ghcr.io/sympozium-ai/llmfit-dra:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --probe-interval=30s
+            - --v=2
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: sysfs
+              mountPath: /sys
+              readOnly: true
+            - name: dev
+              mountPath: /dev
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: sysfs
+          hostPath:
+            path: /sys
+        - name: dev
+          hostPath:
+            path: /dev

@@ -1,0 +1,51 @@
+{
+  "8086:64a0": {
+    "model": "Intel Arc Graphics 140V",
+    "memoryBandwidthGBs": 136,
+    "unifiedMemory": true
+  },
+  "8086:643e": {
+    "model": "Intel AI Boost NPU 4",
+    "memoryBandwidthGBs": 136,
+    "unifiedMemory": true
+  },
+  "1002:1586": {
+    "model": "AMD Radeon 8060S (Strix Halo)",
+    "memoryBandwidthGBs": 256,
+    "unifiedMemory": true
+  },
+  "1022:17f0": {
+    "model": "AMD XDNA 2 NPU (Strix Halo)",
+    "memoryBandwidthGBs": 256,
+    "unifiedMemory": true
+  },
+  "8086:7d55": {
+    "model": "Intel Arc Graphics (Meteor Lake)",
+    "memoryBandwidthGBs": 120,
+    "unifiedMemory": true
+  },
+  "10de:2684": {
+    "model": "NVIDIA GeForce RTX 4090",
+    "memoryBandwidthGBs": 1008
+  },
+  "10de:2b85": {
+    "model": "NVIDIA GeForce RTX 5090",
+    "memoryBandwidthGBs": 1792
+  },
+  "10de:26b9": {
+    "model": "NVIDIA L40S",
+    "memoryBandwidthGBs": 864
+  },
+  "10de:2330": {
+    "model": "NVIDIA H100 SXM5 80GB",
+    "memoryBandwidthGBs": 3350
+  },
+  "1002:744c": {
+    "model": "AMD Radeon RX 7900 XTX",
+    "memoryBandwidthGBs": 960
+  },
+  "1002:74a1": {
+    "model": "AMD Instinct MI300X",
+    "memoryBandwidthGBs": 5300
+  }
+}
