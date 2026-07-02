@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.0...v0.2.1) (2026-07-02)
+
+
+### Features
+
+* consume llmfit over its serve API on an AF_UNIX socket ([4f3e758](https://github.com/sympozium-ai/llmfit-dra/commit/4f3e7582b4452ba043d01fd263739fd24bffb9b7))
+
 ## [0.2.0](https://github.com/sympozium-ai/llmfit-dra/compare/v0.1.0...v0.2.0) (2026-07-02)
 
 
