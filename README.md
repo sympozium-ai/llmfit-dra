@@ -63,8 +63,12 @@ Provenance is explicit in the `source` attribute: `llmfit` | `index` | `probe`.
 
 ## What gets published
 
-One ResourceSlice per node (pool = node name). Devices are named `gpu0…N`,
-`npu0…N`, `cpu0`; identity lives in attributes, never names.
+One ResourceSlice per node (pool = node name). PCI devices are named by
+PCI address — `gpu-0000-c3-00-0`, `npu-0000-c4-00-1` — because DRA
+allocations and kubelet-plugin prepare join on device *names*, so a name
+must identify the same silicon across reboots, hot-remove, and driver
+reloads (an enumeration counter like `gpu0` does not). The CPU fallback
+stays `cpu0`. Descriptive identity still lives in attributes.
 
 | Attribute (`llmfit.ai/…`) | Type | Example |
 |---|---|---|

@@ -106,9 +106,10 @@ cpu_mem=$(echo "$devices" | jq -r '.[] | select(.name == "cpu0") | .capacity.mem
 # with no bandwidth and must not count). The same suite must pass on such
 # nodes via the cpu0 fallback device.
 HAS_GPU=0
-if echo "$devices" | jq -e '.[] | select(.name == "gpu0") | .attributes.memoryBandwidthGBs.int > 0' >/dev/null 2>&1; then
+GPU_DEV=$(echo "$devices" | jq -r 'first(.[] | select(.attributes.kind.string == "gpu" and (.attributes.memoryBandwidthGBs.int // 0) > 0)) | .name // empty')
+if [ -n "$GPU_DEV" ]; then
   HAS_GPU=1
-  gpu0=$(echo "$devices" | jq '.[] | select(.name == "gpu0")')
+  gpu0=$(echo "$devices" | jq --arg n "$GPU_DEV" '.[] | select(.name == $n)')
   vendor=$(echo "$gpu0" | jq -r '.attributes.vendor.string')
   case "$vendor" in intel|amd|nvidia) ;; *) fail "gpu0 vendor '$vendor' not a known vendor" ;; esac
   [ "$(echo "$gpu0" | jq -r '.attributes.indexed.bool')" = "true" ] || fail "gpu0 not matched by capability index"
@@ -117,16 +118,17 @@ if echo "$devices" | jq -e '.[] | select(.name == "gpu0") | .attributes.memoryBa
   [ "$bw" -gt 0 ] 2>/dev/null || fail "gpu0 has no memoryBandwidthGBs"
   mem=$(echo "$gpu0" | jq -r '.capacity.memory.value // .capacity.memory')
   [ -n "$mem" ] && [ "$mem" != "null" ] || fail "gpu0 has no memory capacity"
-  pass "gpu0: $vendor '$model', indexed, bandwidth=${bw}GB/s, memory=${mem}"
+  pass "$GPU_DEV: $vendor '$model', indexed, bandwidth=${bw}GB/s, memory=${mem}"
 else
   echo "  SKIP: no fit-capable gpu0 on this node — running in CPU-only mode"
   pass "cpu0 present with memory capacity ${cpu_mem}"
 fi
 
-if echo "$devices" | jq -e '.[] | select(.name == "npu0")' >/dev/null; then
-  pass "npu0 present ($(echo "$devices" | jq -r '.[] | select(.name=="npu0") | .attributes.model.string'))"
+NPU_DEV=$(echo "$devices" | jq -r 'first(.[] | select(.attributes.kind.string == "npu")) | .name // empty')
+if [ -n "$NPU_DEV" ]; then
+  pass "$NPU_DEV present ($(echo "$devices" | jq --arg n "$NPU_DEV" -r '.[] | select(.name==$n) | .attributes.model.string'))"
 else
-  echo "  SKIP: npu0 not present on this node"
+  echo "  SKIP: no npu on this node"
 fi
 
 echo "== Scenario 3: reconcile after delete"
@@ -157,7 +159,7 @@ cleanup() { kubectl delete --ignore-not-found pod/llmfit-consumer resourceclaim/
 trap cleanup EXIT
 cleanup
 if [ "$HAS_GPU" = 1 ]; then
-  CLASS=gpu.llmfit.ai WANT=gpu0
+  CLASS=gpu.llmfit.ai WANT=$GPU_DEV
   CEL='device.attributes["llmfit.ai"].memoryBandwidthGBs >= 100 &&
                   device.capacity["llmfit.ai"].memory.compareTo(quantity("8Gi")) >= 0'
 else
@@ -227,7 +229,7 @@ echo "== Scenario 5: llmfit is the capability source"
 cpu_src=$(our_slice | jq -r '.[0].spec.devices[] | select(.name == "cpu0") | .attributes.source.string')
 [ "$cpu_src" = "llmfit" ] || fail "cpu0 source is '$cpu_src', expected 'llmfit' (did llmfit exec fail in the pod?)"
 if [ "$HAS_GPU" = 1 ]; then
-  gpu0=$(our_slice | jq '.[0].spec.devices[] | select(.name == "gpu0")')
+  gpu0=$(our_slice | jq --arg n "$GPU_DEV" '.[0].spec.devices[] | select(.name == $n)')
   src=$(echo "$gpu0" | jq -r '.attributes.source.string')
   [ "$src" = "llmfit" ] || fail "gpu0 source is '$src', expected 'llmfit'"
   backend=$(echo "$gpu0" | jq -r '.attributes.backend.string')
@@ -414,7 +416,7 @@ EOF
     || fail "deployment did not become ready with a template-instantiated claim"
   dpod=$(kubectl get pod -l app=llmfit-deploy-consumer -o name | head -1)
   env_dev=$(kubectl exec "${dpod#pod/}" -- sh -c 'echo $LLMFIT_DEVICE')
-  [ "$env_dev" = "gpu0" ] || fail "deployment pod sees LLMFIT_DEVICE='$env_dev', want gpu0"
+  [ "$env_dev" = "$GPU_DEV" ] || fail "deployment pod sees LLMFIT_DEVICE='$env_dev', want $GPU_DEV"
   gen_claims=$(kubectl get resourceclaims -o json | jq '[.items[] | select(.metadata.annotations["resource.kubernetes.io/pod-claim-name"] == "model")] | length')
   [ "$gen_claims" -ge 1 ] || fail "no per-pod ResourceClaim instantiated from the template"
   kubectl delete deployment llmfit-deploy-consumer --wait >/dev/null
@@ -425,14 +427,14 @@ EOF
     sleep 2
   done
   [ -n "$gone" ] || fail "template-instantiated claim not garbage-collected after deployment delete"
-  pass "Deployment ran on gpu0 via generated template; per-pod claim GC'd on delete"
+  pass "Deployment ran on $GPU_DEV via generated template; per-pod claim GC'd on delete"
 else
   echo "  SKIP: needs an accelerator (generated CEL has a bandwidth floor)"
 fi
 
 echo "== Scenario 11: matchAttribute alignment via resource.kubernetes.io/pcieRoot"
 HAS_NPU=0
-our_slice | jq -e '.[0].spec.devices[] | select(.name == "npu0")' >/dev/null && HAS_NPU=1
+[ -n "${NPU_DEV:-}" ] && HAS_NPU=1
 if [ "$HAS_GPU" = 1 ] && [ "$HAS_NPU" = 1 ]; then
   cleanup11() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-aligned-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-aligned-claim >/dev/null 2>&1; }
   trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11' EXIT
@@ -477,11 +479,12 @@ EOF
     || fail "aligned gpu+npu claim did not allocate/prepare (matchAttribute broken?)"
   count=$(kubectl get resourceclaim llmfit-aligned-claim -o jsonpath='{.status.allocation.devices.results}' | jq 'length')
   [ "$count" = 2 ] || fail "expected 2 allocated devices, got $count"
-  gpu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c 'echo $LLMFIT_DEVICE_GPU0')
-  npu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c 'echo $LLMFIT_DEVICE_NPU0')
+  env_key() { echo "LLMFIT_DEVICE_$(echo "$1" | tr 'a-z-' 'A-Z_')"; }
+  gpu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c "echo \$$(env_key "$GPU_DEV")")
+  npu_env=$(kubectl exec llmfit-aligned-consumer -- sh -c "echo \$$(env_key "$NPU_DEV")")
   [ -n "$gpu_env" ] && [ -n "$npu_env" ] || fail "multi-device CDI merge lost a device (gpu='$gpu_env' npu='$npu_env')"
-  kubectl exec llmfit-aligned-consumer -- test -e /dev/accel/accel0 || fail "npu device node not injected"
-  kubectl exec llmfit-aligned-consumer -- sh -c 'test -e "$LLMFIT_DEVICE_GPU0"' || fail "gpu device node not injected"
+  kubectl exec llmfit-aligned-consumer -- test -e "$npu_env" || fail "npu device node $npu_env not injected"
+  kubectl exec llmfit-aligned-consumer -- test -e "$gpu_env" || fail "gpu device node $gpu_env not injected"
   pass "gpu+npu aligned on one pcieRoot, both prepared into one pod (gpu=$gpu_env npu=$npu_env)"
 else
   echo "  SKIP: needs both gpu0 and npu0 on the node"

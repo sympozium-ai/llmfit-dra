@@ -49,7 +49,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 		byName[d.Name] = i
 	}
 
-	igpu := devices[byName["gpu0"]]
+	igpu := devices[byName["gpu-0000-00-02-0"]]
 	assertStr(t, igpu.Attributes, "vendor", "intel")
 	assertStr(t, igpu.Attributes, "model", "Intel Arc Graphics 140V")
 	assertStr(t, igpu.Attributes, "kind", "gpu")
@@ -63,7 +63,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 	// Unified memory device: capacity = system RAM.
 	assertMemory(t, igpu, int64(systemRAM))
 
-	dgpu := devices[byName["gpu1"]]
+	dgpu := devices[byName["gpu-0000-01-00-0"]]
 	assertStr(t, dgpu.Attributes, "vendor", "nvidia")
 	assertStr(t, dgpu.Attributes, "model", "NVIDIA GeForce RTX 4090")
 	assertBool(t, dgpu.Attributes, "unifiedMemory", false)
@@ -71,7 +71,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 	// Dedicated VRAM: capacity = VRAM, not system RAM.
 	assertMemory(t, dgpu, 24*1024*1024*1024)
 
-	npu := devices[byName["npu0"]]
+	npu := devices[byName["npu-0000-00-0b-0"]]
 	assertStr(t, npu.Attributes, "kind", "npu")
 	assertBool(t, npu.Attributes, "indexed", true)
 
@@ -197,7 +197,7 @@ func TestBuildDevicesWithLLMFit(t *testing.T) {
 		byName[d.Name] = d
 	}
 
-	gpu := byName["gpu0"]
+	gpu := byName["gpu-0000-c3-00-0"]
 	assertStr(t, gpu.Attributes, "source", "llmfit")
 	assertStr(t, gpu.Attributes, "model", "AMD Radeon 8060S (Strix Halo)")
 	assertStr(t, gpu.Attributes, "backend", "Vulkan")
@@ -211,7 +211,7 @@ func TestBuildDevicesWithLLMFit(t *testing.T) {
 	assertStr(t, gpu.Attributes, "driver", "amdgpu")
 
 	// llmfit does not report XDNA NPUs: falls back to the embedded index.
-	npu := byName["npu0"]
+	npu := byName["npu0"] // no PCI address probed: falls back to the counter name
 	assertStr(t, npu.Attributes, "source", "index")
 	assertStr(t, npu.Attributes, "model", "AMD XDNA 2 NPU (Strix Halo)")
 
@@ -226,7 +226,7 @@ func TestBuildDevicesLLMFitFallbackWhenNil(t *testing.T) {
 	for _, d := range devices {
 		byName[d.Name] = d
 	}
-	assertStr(t, byName["gpu0"].Attributes, "source", "index")
+	assertStr(t, byName["gpu-0000-00-02-0"].Attributes, "source", "index")
 	assertStr(t, byName["gpu2"].Attributes, "source", "probe")
 	assertStr(t, byName["cpu0"].Attributes, "source", "probe")
 }

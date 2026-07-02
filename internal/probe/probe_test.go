@@ -82,49 +82,49 @@ func TestWalk(t *testing.T) {
 		byName[d.Name()] = d
 	}
 
-	igpu, ok := byName["gpu0"]
+	igpu, ok := byName["gpu-0000-00-02-0"]
 	if !ok {
-		t.Fatal("gpu0 missing")
+		t.Fatal("gpu-0000-00-02-0 missing")
 	}
 	if igpu.PCIVendor != "8086" || igpu.PCIDevice != "64a0" {
-		t.Errorf("gpu0 ids = %s:%s, want 8086:64a0", igpu.PCIVendor, igpu.PCIDevice)
+		t.Errorf("gpu-0000-00-02-0 ids = %s:%s, want 8086:64a0", igpu.PCIVendor, igpu.PCIDevice)
 	}
 	if igpu.Driver != "xe" {
-		t.Errorf("gpu0 driver = %q, want xe", igpu.Driver)
+		t.Errorf("gpu-0000-00-02-0 driver = %q, want xe", igpu.Driver)
 	}
 	if !igpu.UnifiedMemory() {
-		t.Error("gpu0 should be unified memory (no VRAM file)")
+		t.Error("gpu-0000-00-02-0 should be unified memory (no VRAM file)")
 	}
 	if igpu.PCIAddr != "0000:00:02.0" || igpu.PCIeRoot != "pci0000:00" {
-		t.Errorf("gpu0 pci = %s / %s, want 0000:00:02.0 / pci0000:00", igpu.PCIAddr, igpu.PCIeRoot)
+		t.Errorf("gpu-0000-00-02-0 pci = %s / %s, want 0000:00:02.0 / pci0000:00", igpu.PCIAddr, igpu.PCIeRoot)
 	}
 	if igpu.DevNode != "/dev/dri/card0" || igpu.RenderNode != "/dev/dri/renderD128" {
-		t.Errorf("gpu0 nodes = %s / %s, want /dev/dri/card0 / /dev/dri/renderD128", igpu.DevNode, igpu.RenderNode)
+		t.Errorf("gpu-0000-00-02-0 nodes = %s / %s, want /dev/dri/card0 / /dev/dri/renderD128", igpu.DevNode, igpu.RenderNode)
 	}
 
-	dgpu, ok := byName["gpu1"]
+	dgpu, ok := byName["gpu-0000-01-00-0"]
 	if !ok {
-		t.Fatal("gpu1 missing")
+		t.Fatal("gpu-0000-01-00-0 missing")
 	}
 	if dgpu.UnifiedMemory() {
-		t.Error("gpu1 has VRAM; should not be unified")
+		t.Error("gpu-0000-01-00-0 has VRAM; should not be unified")
 	}
 	if dgpu.VRAMBytes != 25753026560 {
-		t.Errorf("gpu1 vram = %d, want 25753026560", dgpu.VRAMBytes)
+		t.Errorf("gpu-0000-01-00-0 vram = %d, want 25753026560", dgpu.VRAMBytes)
 	}
 	if dgpu.RenderNode != "/dev/dri/renderD129" {
-		t.Errorf("gpu1 render node = %q, want /dev/dri/renderD129 (must pair via sysfs drm/, not card index)", dgpu.RenderNode)
+		t.Errorf("gpu-0000-01-00-0 render node = %q, want /dev/dri/renderD129 (must pair via sysfs drm/, not card index)", dgpu.RenderNode)
 	}
 
-	npu, ok := byName["npu0"]
+	npu, ok := byName["npu-0000-00-0b-0"]
 	if !ok {
-		t.Fatal("npu0 missing")
+		t.Fatal("npu-0000-00-0b-0 missing")
 	}
 	if npu.Driver != "intel_vpu" {
-		t.Errorf("npu0 driver = %q, want intel_vpu", npu.Driver)
+		t.Errorf("npu-0000-00-0b-0 driver = %q, want intel_vpu", npu.Driver)
 	}
 	if npu.DevNode != "/dev/accel/accel0" || npu.RenderNode != "" {
-		t.Errorf("npu0 nodes = %s / %q, want /dev/accel/accel0 / \"\"", npu.DevNode, npu.RenderNode)
+		t.Errorf("npu-0000-00-0b-0 nodes = %s / %q, want /dev/accel/accel0 / \"\"", npu.DevNode, npu.RenderNode)
 	}
 
 	cpu, ok := byName["cpu0"]
@@ -139,6 +139,45 @@ func TestWalk(t *testing.T) {
 	}
 	if cpu.DevNode != "" || cpu.RenderNode != "" {
 		t.Errorf("cpu0 should have no device nodes, got %s / %s", cpu.DevNode, cpu.RenderNode)
+	}
+}
+
+// TestNameStableUnderRemoval is the audit's keystone fix: device names must
+// identify silicon, not enumeration position. Removing an earlier card must
+// not rename the survivors (gpu0/gpu1 counters would).
+func TestNameStableUnderRemoval(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	p := New(sysRoot, procRoot)
+	before, err := p.Walk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hot-remove the first GPU (card0 / 0000:00:02.0).
+	for _, path := range []string{
+		filepath.Join(sysRoot, "class", "drm", "card0"),
+		filepath.Join(sysRoot, "devices", "pci0000:00", "0000:00:02.0"),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := p.Walk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(ds []Device) map[string]string {
+		m := map[string]string{}
+		for _, d := range ds {
+			m[d.Name()] = d.PCIAddr
+		}
+		return m
+	}
+	b, a := names(before), names(after)
+	if _, still := a["gpu-0000-00-02-0"]; still {
+		t.Error("removed device still present")
+	}
+	if b["gpu-0000-01-00-0"] != "0000:01:00.0" || a["gpu-0000-01-00-0"] != "0000:01:00.0" {
+		t.Errorf("surviving GPU renamed or remapped: before=%v after=%v", b, a)
 	}
 }
 
@@ -173,17 +212,17 @@ func TestWalkReadsRASCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range devices {
-		if d.Name() == "gpu1" {
+		if d.Name() == "gpu-0000-01-00-0" {
 			if d.RASUncorrectable != 3 {
-				t.Errorf("gpu1 RASUncorrectable = %d, want 3", d.RASUncorrectable)
+				t.Errorf("gpu-0000-01-00-0 RASUncorrectable = %d, want 3", d.RASUncorrectable)
 			}
 			if ok, reason := d.Healthy(); ok || reason != "uncorrectableEcc" {
-				t.Errorf("gpu1 Healthy() = (%v, %q), want (false, uncorrectableEcc)", ok, reason)
+				t.Errorf("gpu-0000-01-00-0 Healthy() = (%v, %q), want (false, uncorrectableEcc)", ok, reason)
 			}
 			return
 		}
 	}
-	t.Fatal("gpu1 missing")
+	t.Fatal("gpu-0000-01-00-0 missing")
 }
 
 func TestWalkGPUWithoutRenderNode(t *testing.T) {
@@ -204,7 +243,7 @@ func TestWalkGPUWithoutRenderNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range devices {
-		if d.Name() == "gpu2" {
+		if d.Name() == "gpu-0000-02-00-0" {
 			if d.DevNode != "/dev/dri/card2" || d.RenderNode != "" {
 				t.Errorf("gpu2 nodes = %s / %q, want /dev/dri/card2 / \"\"", d.DevNode, d.RenderNode)
 			}

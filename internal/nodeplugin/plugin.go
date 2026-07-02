@@ -146,7 +146,9 @@ func editsFor(d probe.Device) containerEdits {
 		Env: []string{
 			"LLMFIT_DEVICE=" + d.Name(),
 			"LLMFIT_DEVICE_KIND=" + string(d.Kind),
-			"LLMFIT_DEVICE_" + strings.ToUpper(d.Name()) + "=" + perDevice,
+			// PCI-derived names contain dashes, which are invalid in env
+			// var names — map to underscores.
+			"LLMFIT_DEVICE_" + strings.ToUpper(strings.ReplaceAll(d.Name(), "-", "_")) + "=" + perDevice,
 		},
 	}
 	if d.RenderNode != "" {

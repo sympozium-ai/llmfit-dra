@@ -74,8 +74,16 @@ func (d Device) Healthy() (bool, string) {
 	return true, ""
 }
 
-// Name returns the stable DNS-label device name, e.g. "gpu0".
+// Name returns the stable DNS-label device name. PCI devices derive it from
+// the PCI address — "gpu-0000-c3-00-0" — because DRA allocations and the
+// kubelet plugin's prepare join on device NAMES: a name must identify the
+// same silicon across reboots, hot-remove, and driver reloads, which an
+// enumeration-order counter (gpu0, gpu1, …) does not. Non-PCI devices (the
+// CPU fallback) keep the counter form; cpu0 is a stable singleton.
 func (d Device) Name() string {
+	if d.PCIAddr != "" {
+		return string(d.Kind) + "-" + strings.NewReplacer(":", "-", ".", "-").Replace(d.PCIAddr)
+	}
 	return fmt.Sprintf("%s%d", d.Kind, d.Index)
 }
 
