@@ -17,6 +17,9 @@
 #                 old instance prepared (CDI file is the only state).
 #   9. Claim gen — `llmfit claim <model>` (run inside the driver image)
 #                 emits a ResourceClaim that applies, allocates, and runs.
+#  10. Deployment — the Phase 2 exit criterion verbatim: a vanilla
+#                 Deployment + generated ResourceClaimTemplate lands on the
+#                 fit device and runs; the per-pod claim is GC'd on delete.
 #
 set -euo pipefail
 
@@ -357,6 +360,63 @@ EOF
   env_dev=$(kubectl exec llmfit-claim-consumer -- sh -c 'echo $LLMFIT_DEVICE')
   [ -n "$alloc" ] && [ "$env_dev" = "$alloc" ] || fail "allocated '$alloc' but container sees LLMFIT_DEVICE='$env_dev'"
   pass "generated claim allocated '$alloc' and pod is Running with matching CDI env"
+else
+  echo "  SKIP: needs an accelerator (generated CEL has a bandwidth floor)"
+fi
+
+echo "== Scenario 10: Deployment + generated ResourceClaimTemplate (Phase 2 exit criterion)"
+if [ "$HAS_GPU" = 1 ]; then
+  # gpu0 is exclusive — release scenario 9's consumer first.
+  cleanup9
+  kubectl wait --for=delete pod/llmfit-claim-consumer --timeout=60s >/dev/null 2>&1 || true
+  cleanup10() { kubectl delete --ignore-not-found --grace-period=1 deployment/llmfit-deploy-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaimtemplate/qwen-fit-tmpl >/dev/null 2>&1; }
+  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10' EXIT
+  cleanup10
+  driver_exec llmfit claim Qwen/Qwen2.5-7B --min-tps 20 --template --name qwen-fit-tmpl | kubectl apply -f - >/dev/null \
+    || fail "llmfit claim --template output did not apply cleanly"
+  kubectl apply -f - <<'EOF' >/dev/null
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llmfit-deploy-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llmfit-deploy-consumer
+  template:
+    metadata:
+      labels:
+        app: llmfit-deploy-consumer
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: main
+          image: docker.io/library/busybox:1.36
+          command: ["sleep", "600"]
+          resources:
+            claims:
+              - name: model
+      resourceClaims:
+        - name: model
+          resourceClaimTemplateName: qwen-fit-tmpl
+EOF
+  kubectl rollout status deployment/llmfit-deploy-consumer --timeout=120s >/dev/null \
+    || fail "deployment did not become ready with a template-instantiated claim"
+  dpod=$(kubectl get pod -l app=llmfit-deploy-consumer -o name | head -1)
+  env_dev=$(kubectl exec "${dpod#pod/}" -- sh -c 'echo $LLMFIT_DEVICE')
+  [ "$env_dev" = "gpu0" ] || fail "deployment pod sees LLMFIT_DEVICE='$env_dev', want gpu0"
+  gen_claims=$(kubectl get resourceclaims -o json | jq '[.items[] | select(.metadata.annotations["resource.kubernetes.io/pod-claim-name"] == "model")] | length')
+  [ "$gen_claims" -ge 1 ] || fail "no per-pod ResourceClaim instantiated from the template"
+  kubectl delete deployment llmfit-deploy-consumer --wait >/dev/null
+  gone=""
+  for i in $(seq 1 30); do
+    left=$(kubectl get resourceclaims -o json | jq '[.items[] | select(.metadata.annotations["resource.kubernetes.io/pod-claim-name"] == "model")] | length')
+    [ "$left" = 0 ] && { gone=1; break; }
+    sleep 2
+  done
+  [ -n "$gone" ] || fail "template-instantiated claim not garbage-collected after deployment delete"
+  pass "Deployment ran on gpu0 via generated template; per-pod claim GC'd on delete"
 else
   echo "  SKIP: needs an accelerator (generated CEL has a bandwidth floor)"
 fi

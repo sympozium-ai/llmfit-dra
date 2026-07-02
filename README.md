@@ -202,6 +202,7 @@ docker/kind daemon lives on another host (e.g. over tailscale).
 7. **Lifecycle** — the per-claim CDI spec exists while the pod runs, unprepare removes it.
 8. **Restart** — running consumers survive a driver restart; the new instance prepares fresh claims and unprepares the old instance's.
 9. **Claim generation** — `llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -` (generator runs from the image) allocates and runs.
+10. **Deployment** — the Phase 2 exit criterion verbatim: a vanilla Deployment consuming a `llmfit claim --template`-generated ResourceClaimTemplate lands on the fit device and runs; the per-pod claim is garbage-collected on delete.
 
 GPU-specific assertions self-skip on nodes without a `gpu0`, so the suite is
 identical on the dev rig and in CI. `make scenarios-cpu` reproduces the CI
