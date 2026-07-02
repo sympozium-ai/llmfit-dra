@@ -12,6 +12,7 @@ package nodeplugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"sync"
 
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
@@ -71,6 +73,10 @@ func Start(ctx context.Context, client kubernetes.Interface, nodeName string, in
 	// The helper listens in this directory but does not create it.
 	if err := os.MkdirAll(filepath.Join(kubeletplugin.KubeletPluginsDir, publisher.DriverName), 0o750); err != nil {
 		return nil, fmt.Errorf("creating plugin socket dir: %w", err)
+	}
+	if err := gcOrphanedSpecs(ctx, client, cdiDir); err != nil {
+		// GC is best-effort: a failed cleanup must not block prepare service.
+		klog.FromContext(ctx).Error(err, "orphaned CDI spec GC failed; continuing")
 	}
 	return kubeletplugin.Start(ctx, &Plugin{inv: inv, cdiDir: cdiDir},
 		kubeletplugin.DriverName(publisher.DriverName),
@@ -165,10 +171,49 @@ func editsFor(d probe.Device) containerEdits {
 }
 
 // HandleError receives background failures from the helper's gRPC servers.
-// Everything the plugin serves is retried by the kubelet, so log loudly and
-// keep running; the DaemonSet restart path covers truly wedged sockets.
+// The helper's contract distinguishes recoverable errors (log, kubelet
+// retries) from fatal ones (a dead DRA/registrar server that will never
+// serve again). A fatal error must not leave a zombie pod that logs while
+// 'Running': exit and let the DaemonSet restart us with fresh sockets.
 func (p *Plugin) HandleError(ctx context.Context, err error, msg string) {
-	klog.FromContext(ctx).Error(err, msg)
+	if errors.Is(err, kubeletplugin.ErrRecoverable) {
+		klog.FromContext(ctx).Error(err, msg)
+		return
+	}
+	klog.FromContext(ctx).Error(err, msg+" (fatal; exiting for DaemonSet restart)")
+	klog.Flush()
+	os.Exit(1)
+}
+
+// gcOrphanedSpecs removes CDI spec files whose ResourceClaim no longer
+// exists — the leak window is a crash between writeSpec and the kubelet
+// recording the prepare, or kubelet checkpoint loss: nothing would ever
+// call Unprepare for that UID again. Runs once at startup; live claims'
+// specs are never touched.
+func gcOrphanedSpecs(ctx context.Context, client kubernetes.Interface, cdiDir string) error {
+	uids, err := specUIDs(cdiDir)
+	if err != nil || len(uids) == 0 {
+		return err
+	}
+	claims, err := client.ResourceV1().ResourceClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing resourceclaims: %w", err)
+	}
+	live := make(map[string]bool, len(claims.Items))
+	for _, c := range claims.Items {
+		live[string(c.UID)] = true
+	}
+	for _, uid := range uids {
+		if live[uid] {
+			continue
+		}
+		if err := removeSpec(cdiDir, uid); err != nil {
+			klog.FromContext(ctx).Error(err, "removing orphaned CDI spec", "uid", uid)
+			continue
+		}
+		klog.FromContext(ctx).Info("removed orphaned CDI spec", "uid", uid)
+	}
+	return nil
 }
 
 // UnprepareResourceClaims removes each claim's CDI spec. The kubelet may call

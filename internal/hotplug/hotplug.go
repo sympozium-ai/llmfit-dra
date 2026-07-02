@@ -11,6 +11,7 @@ package hotplug
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -18,11 +19,12 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// subsystems we re-probe for. Everything else (usb, block, …) is noise.
+// subsystems we re-probe for. Everything else is noise — including "pci",
+// which would match every NIC/NVMe flap on the node: GPU/NPU appearance,
+// removal, and driver bind/unbind all surface as drm/accel class events.
 var subsystems = map[string]bool{
 	"drm":   true,
 	"accel": true,
-	"pci":   true, // bind/unbind arrives on the pci subsystem
 }
 
 // uevent is one parsed kernel message.
@@ -69,6 +71,10 @@ func Listen(ctx context.Context, debounce time.Duration) (<-chan struct{}, error
 		return nil, err
 	}
 
+	// A bigger receive buffer survives event storms longer before ENOBUFS.
+	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 1<<20)
+
+	raw := make(chan uevent, 16)
 	events := make(chan struct{}, 1)
 	go func() {
 		defer unix.Close(fd)
@@ -77,26 +83,57 @@ func Listen(ctx context.Context, debounce time.Duration) (<-chan struct{}, error
 			unix.Close(fd)
 		}()
 		buf := make([]byte, 4096)
-		var last time.Time
 		for {
 			n, err := unix.Read(fd, buf)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
+				// ENOBUFS means the kernel dropped messages during a storm —
+				// the storm is exactly when we must keep listening. Signal a
+				// re-probe (we may have missed a relevant event) and read on.
+				if errors.Is(err, unix.ENOBUFS) {
+					klog.V(2).InfoS("uevent overrun; forcing re-probe and continuing")
+					select {
+					case raw <- uevent{action: "overrun", subsystem: "drm"}:
+					default:
+					}
+					continue
+				}
 				klog.ErrorS(err, "uevent read failed; hotplug listener stopping")
+				close(raw)
 				return
 			}
 			ev, ok := parseUevent(buf[:n])
 			if !ok || !relevant(ev) {
 				continue
 			}
-			// Coalesce bursts (one hotplug = many uevents).
-			if time.Since(last) < debounce {
-				continue
+			select {
+			case raw <- ev:
+			default: // coalescer is behind; the pending signal covers it
 			}
-			last = time.Now()
+		}
+	}()
+	// Trailing-edge debounce: a burst (one hotplug = many uevents) produces
+	// ONE signal after the burst settles, so the re-probe sees the final
+	// state instead of a half-initialized device.
+	go func() {
+		for ev := range raw {
 			klog.V(2).InfoS("accelerator uevent", "action", ev.action, "subsystem", ev.subsystem)
+			timer := time.NewTimer(debounce)
+		drain:
+			for {
+				select {
+				case _, ok := <-raw:
+					if !ok {
+						break drain
+					}
+					timer.Reset(debounce)
+				case <-timer.C:
+					break drain
+				}
+			}
+			timer.Stop()
 			select {
 			case events <- struct{}{}:
 			default: // a re-probe is already pending

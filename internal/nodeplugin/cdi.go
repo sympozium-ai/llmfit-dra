@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -89,4 +90,18 @@ func removeSpec(dir, claimUID string) error {
 		return nil
 	}
 	return err
+}
+
+// specUIDs lists the claim UIDs that currently have a spec file in dir.
+func specUIDs(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "llmfit.ai-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	uids := make([]string, 0, len(matches))
+	for _, m := range matches {
+		base := strings.TrimSuffix(filepath.Base(m), ".json")
+		uids = append(uids, strings.TrimPrefix(base, "llmfit.ai-"))
+	}
+	return uids, nil
 }

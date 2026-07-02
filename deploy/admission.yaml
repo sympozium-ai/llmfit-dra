@@ -1,0 +1,40 @@
+# Scope the driver ServiceAccount's ResourceSlice writes to its own node.
+#
+# The DaemonSet shares one ServiceAccount across nodes, so RBAC alone lets a
+# compromised node forge or delete EVERY node's inventory (cluster-wide
+# scheduling manipulation). Kubelet-issued bound tokens carry the pod's node
+# in userInfo extra (authentication.kubernetes.io/node-name, K8s >= 1.30);
+# this policy requires every write by the llmfit-dra SA to be (a) for the
+# llmfit.ai driver and (b) for the node the writing pod actually runs on.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: llmfit-dra-slice-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["resource.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["resourceslices"]
+  matchConditions:
+    - name: only-the-llmfit-dra-sa
+      expression: request.userInfo.username == 'system:serviceaccount:llmfit-dra:llmfit-dra'
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject : object).spec.driver == 'llmfit.ai'
+      message: the llmfit-dra ServiceAccount may only manage llmfit.ai ResourceSlices
+    - expression: >-
+        ('authentication.kubernetes.io/node-name' in request.userInfo.extra) &&
+        (request.operation == 'DELETE' ? oldObject : object).spec.nodeName ==
+          request.userInfo.extra['authentication.kubernetes.io/node-name'][0]
+      message: the llmfit-dra ServiceAccount may only manage ResourceSlices for its own node
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: llmfit-dra-slice-scope
+spec:
+  policyName: llmfit-dra-slice-scope
+  validationActions: ["Deny"]

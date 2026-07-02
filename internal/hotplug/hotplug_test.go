@@ -30,7 +30,9 @@ func TestParseUeventRejectsLibudevRebroadcast(t *testing.T) {
 }
 
 func TestRelevantSubsystems(t *testing.T) {
-	cases := map[string]bool{"drm": true, "accel": true, "pci": true, "usb": false, "block": false, "": false}
+	// pci is deliberately NOT relevant: it would match every NIC/NVMe flap;
+	// accelerator lifecycle surfaces on the drm/accel class events.
+	cases := map[string]bool{"drm": true, "accel": true, "pci": false, "usb": false, "block": false, "": false}
 	for sub, want := range cases {
 		if got := relevant(uevent{action: "add", subsystem: sub}); got != want {
 			t.Errorf("relevant(%q) = %v, want %v", sub, got, want)

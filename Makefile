@@ -37,27 +37,31 @@ sideload: image
 # Create/refresh the GHCR pull secret in every namespace that pulls
 # private sympozium-ai images. Requires a token with read:packages:
 # GITHUB_TOKEN from the environment, falling back to `gh auth token`
-# (which needs `gh auth refresh -s read:packages`).
+# (which needs `gh auth refresh -s read:packages`). The token travels via
+# the environment and stdin — never in process arguments.
 GHCR_USER ?= AlexsJones
-GHCR_TOKEN ?= $(or $(GITHUB_TOKEN),$(shell gh auth token))
 PULL_SECRET_NAMESPACES ?= llmfit-dra sympozium-system
+pull-secret: export GHCR_TOKEN := $(or $(GITHUB_TOKEN),$(shell gh auth token))
 pull-secret:
 	@for ns in $(PULL_SECRET_NAMESPACES); do \
-	  kubectl create secret docker-registry ghcr-pull \
-	    --docker-server=ghcr.io \
-	    --docker-username=$(GHCR_USER) \
-	    --docker-password=$(GHCR_TOKEN) \
-	    -n $$ns --dry-run=client -o yaml | kubectl apply -f -; \
+	  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+	    "$$(printf '%s:%s' '$(GHCR_USER)' "$$GHCR_TOKEN" | base64 -w0)" | \
+	  kubectl -n $$ns create secret generic ghcr-pull \
+	    --type=kubernetes.io/dockerconfigjson \
+	    --from-file=.dockerconfigjson=/dev/stdin \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
 	done
 
 deploy:
 	kubectl apply -f deploy/rbac.yaml
+	kubectl apply -f deploy/admission.yaml
 	kubectl apply -f deploy/deviceclass.yaml
 	kubectl apply -f deploy/daemonset.yaml
 
 undeploy:
 	kubectl delete -f deploy/daemonset.yaml --ignore-not-found
 	kubectl delete -f deploy/deviceclass.yaml --ignore-not-found
+	kubectl delete -f deploy/admission.yaml --ignore-not-found
 	kubectl delete -f deploy/rbac.yaml --ignore-not-found
 
 scenarios:

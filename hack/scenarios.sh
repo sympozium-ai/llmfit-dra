@@ -30,6 +30,9 @@
 #  13. Coexist  — Phase 4: a (forged) vendor DRA driver slice for this node
 #                 demotes our GPUs to fitness-only (vendorManaged attr);
 #                 default classes refuse them; removal restores allocation.
+#  14. Admission — Phase 4: the ValidatingAdmissionPolicy denies the driver
+#                 SA writing slices for other nodes / other drivers, while
+#                 the driver's own node-bound writes keep working.
 #
 set -euo pipefail
 
@@ -498,14 +501,22 @@ else
 fi
 
 echo "== Scenario 12: uevent-triggered re-probe (hot-attach path)"
+# The production driver runs unprivileged (no hostPID), so host-namespace
+# operations use a throwaway privileged pod instead of the driver.
+cleanup_host() { kubectl -n kube-system delete pod scenario-host --ignore-not-found --grace-period=1 >/dev/null 2>&1; }
+trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host' EXIT
+cleanup_host
+kubectl -n kube-system run scenario-host --restart=Never --image=docker.io/library/busybox:1.36 \
+  --overrides='{"spec":{"nodeName":"'"$node"'","hostPID":true,"containers":[{"name":"scenario-host","image":"docker.io/library/busybox:1.36","command":["sleep","600"],"securityContext":{"privileged":true}}]}}' >/dev/null
+kubectl -n kube-system wait --for=condition=Ready pod/scenario-host --timeout=90s >/dev/null
+host_exec() { kubectl -n kube-system exec scenario-host -- nsenter -t 1 -m -- sh -c "$1"; }
 # Synthesize a kernel uevent by writing to a drm device's uevent file in
-# the HOST mount namespace (the driver pod's /sys mount is read-only).
-if driver_exec nsenter -t 1 -m -- sh -c 'ls /sys/class/drm/card*/uevent >/dev/null 2>&1'; then
+# the HOST mount namespace.
+if host_exec 'ls /sys/class/drm/card*/uevent >/dev/null 2>&1'; then
   before=$(kubectl -n "$NS" logs ds/llmfit-dra | grep -c "uevent-triggered re-probe" || true)
   # kind nodes mount /sys read-only: remount rw just long enough to write
   # (echo into a uevent file makes the kernel emit that event for real).
-  driver_exec nsenter -t 1 -m -- sh -c \
-    'u=$(ls -d /sys/class/drm/card*/uevent | head -1); mount -o remount,rw /sys; rc=1; echo change > "$u" && rc=0; mount -o remount,ro /sys; exit $rc'
+  host_exec 'u=$(ls -d /sys/class/drm/card*/uevent | head -1); mount -o remount,rw /sys; rc=1; echo change > "$u" && rc=0; mount -o remount,ro /sys; exit $rc'
   triggered=""
   for i in $(seq 1 15); do
     after=$(kubectl -n "$NS" logs ds/llmfit-dra | grep -c "uevent-triggered re-probe" || true)
@@ -521,7 +532,7 @@ fi
 echo "== Scenario 13: vendor coexistence — a vendor driver's presence demotes our GPUs"
 if [ "$HAS_GPU" = 1 ]; then
   cleanup13() { kubectl delete --ignore-not-found resourceslice/fake-vendor-slice pod/llmfit-coexist-consumer resourceclaim/llmfit-coexist-claim >/dev/null 2>&1; }
-  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup13' EXIT
+  trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup_host; cleanup13' EXIT
   cleanup13
   node=$(our_slice | jq -r '.[0].spec.nodeName')
   kubectl apply -f - <<EOF >/dev/null
@@ -564,6 +575,33 @@ EOF
   pass "vendor presence demoted $GPU_DEV (default class refused it); removal restored it"
 else
   echo "  SKIP: needs a fit-capable GPU"
+fi
+
+echo "== Scenario 14: admission policy scopes slice writes to the writer's node"
+# The driver's own writes demonstrably work (scenarios 1/3). A request AS
+# the driver SA but without a node-bound token (kubectl impersonation has
+# no node-name extra) must be denied.
+if kubectl get validatingadmissionpolicy llmfit-dra-slice-scope >/dev/null 2>&1; then
+  deny_out=$(kubectl --as=system:serviceaccount:llmfit-dra:llmfit-dra apply -f - 2>&1 <<EOF || true
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: forged-slice
+spec:
+  driver: llmfit.ai
+  nodeName: some-other-node
+  pool:
+    name: some-other-node
+    resourceSliceCount: 1
+  devices:
+    - name: gpu-fake
+EOF
+)
+  echo "$deny_out" | grep -q "denied" || fail "forged cross-node slice was NOT denied: $deny_out"
+  kubectl delete resourceslice forged-slice --ignore-not-found >/dev/null 2>&1
+  pass "cross-node slice forgery denied by ValidatingAdmissionPolicy"
+else
+  echo "  SKIP: ValidatingAdmissionPolicy not installed (run 'make deploy')"
 fi
 
 echo

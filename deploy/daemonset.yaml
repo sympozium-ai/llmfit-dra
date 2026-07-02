@@ -9,6 +9,13 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: llmfit-dra
+  # One instance at a time per node; the kubelet retries prepares across the
+  # (short) gap. maxSurge would need the helper's RollingUpdate socket-name
+  # option — deliberately not used yet.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -17,11 +24,16 @@ spec:
       serviceAccountName: llmfit-dra
       imagePullSecrets:
         - name: ghcr-pull
-      # Stage two: full host access. llmfit assesses the node exactly as it
-      # would when run natively — real /sys, real /dev, host PID namespace.
-      hostPID: true
+      # Must run (and stay running) on every accelerator node: those nodes
+      # are routinely tainted, and evicting the driver wedges the claim
+      # lifecycle while slices stay published.
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
       # The uevent netlink socket is network-namespace scoped: hostNetwork
-      # is what lets the hot-attach listener see host device events.
+      # is what lets the hot-attach listener see host device events. That is
+      # the ONLY host namespace a code path needs — no hostPID, and
+      # NET_ADMIN below instead of privileged.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -37,7 +49,8 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           securityContext:
-            privileged: true
+            capabilities:
+              add: ["NET_ADMIN"] # uevent netlink subscribe
           volumeMounts:
             - name: sysfs
               mountPath: /sys
