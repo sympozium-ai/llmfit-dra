@@ -344,7 +344,11 @@ if [ "$HAS_GPU" = 1 ]; then
   cleanup9() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-claim-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/qwen-qwen2-5-7b-fit >/dev/null 2>&1; }
   trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9' EXIT
   cleanup9
-  driver_exec llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f - >/dev/null \
+  claim_yaml=$(driver_exec llmfit claim Qwen/Qwen2.5-7B --min-tps 20)
+  # Optional lookups must be guarded (missing attr = non-match, not error).
+  echo "$claim_yaml" | grep -q "'memoryBandwidthGBs' in device.attributes" \
+    || fail "generated CEL lacks the optional-attribute guard"
+  echo "$claim_yaml" | kubectl apply -f - >/dev/null \
     || fail "llmfit claim output did not apply cleanly"
   kubectl apply -f - <<'EOF' >/dev/null
 apiVersion: v1
