@@ -31,9 +31,13 @@ const DriverName = "llmfit.ai"
 func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sys *llmfit.System) []resourceapi.Device {
 	out := make([]resourceapi.Device, 0, len(devices))
 	for _, d := range devices {
+		healthy, reason := d.Healthy()
 		attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 			"kind":    {StringValue: ptr.To(string(d.Kind))},
-			"healthy": {BoolValue: ptr.To(true)},
+			"healthy": {BoolValue: ptr.To(healthy)},
+		}
+		if reason != "" {
+			attrs["healthReason"] = resourceapi.DeviceAttribute{StringValue: ptr.To(reason)}
 		}
 
 		var memBytes uint64

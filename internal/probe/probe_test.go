@@ -142,6 +142,50 @@ func TestWalk(t *testing.T) {
 	}
 }
 
+func TestHealthy(t *testing.T) {
+	cases := []struct {
+		name   string
+		dev    Device
+		want   bool
+		reason string
+	}{
+		{"cpu always healthy", Device{Kind: KindCPU}, true, ""},
+		{"bound gpu healthy", Device{Kind: KindGPU, Driver: "amdgpu"}, true, ""},
+		{"unbound driver", Device{Kind: KindGPU}, false, "driverUnbound"},
+		{"ecc errors", Device{Kind: KindGPU, Driver: "amdgpu", RASUncorrectable: 2}, false, "uncorrectableEcc"},
+		{"npu unbound", Device{Kind: KindNPU}, false, "driverUnbound"},
+	}
+	for _, c := range cases {
+		ok, reason := c.dev.Healthy()
+		if ok != c.want || reason != c.reason {
+			t.Errorf("%s: Healthy() = (%v, %q), want (%v, %q)", c.name, ok, reason, c.want, c.reason)
+		}
+	}
+}
+
+func TestWalkReadsRASCounter(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	// Give the AMD dGPU an uncorrectable error count.
+	mustMkdir(t, filepath.Join(sysRoot, "devices", "pci0000:00", "0000:01:00.0", "ras"))
+	mustWrite(t, filepath.Join(sysRoot, "devices", "pci0000:00", "0000:01:00.0", "ras", "ue_count"), "3\n")
+	devices, err := New(sysRoot, procRoot).Walk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range devices {
+		if d.Name() == "gpu1" {
+			if d.RASUncorrectable != 3 {
+				t.Errorf("gpu1 RASUncorrectable = %d, want 3", d.RASUncorrectable)
+			}
+			if ok, reason := d.Healthy(); ok || reason != "uncorrectableEcc" {
+				t.Errorf("gpu1 Healthy() = (%v, %q), want (false, uncorrectableEcc)", ok, reason)
+			}
+			return
+		}
+	}
+	t.Fatal("gpu1 missing")
+}
+
 func TestWalkGPUWithoutRenderNode(t *testing.T) {
 	sysRoot, procRoot := buildFakeTree(t)
 	// A display-only DRM device: drm/ pairs only the card minor.

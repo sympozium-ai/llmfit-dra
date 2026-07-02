@@ -50,6 +50,28 @@ type Device struct {
 	// CPUModel and SystemRAMBytes are set on the CPU fallback device.
 	CPUModel       string
 	SystemRAMBytes uint64
+
+	// RASUncorrectable is the device's uncorrectable memory error count
+	// (amdgpu RAS ue_count; 0 where the driver doesn't expose it).
+	RASUncorrectable uint64
+}
+
+// Healthy reports whether the device is usable, with a machine-readable
+// reason when it isn't. Facts only: a device with no bound kernel driver
+// cannot be prepared, and uncorrectable ECC errors mean its memory lies.
+// Event-driven health (XID/DCGM watches) is Phase 3 roadmap; this is the
+// per-probe-cycle baseline.
+func (d Device) Healthy() (bool, string) {
+	if d.Kind == KindCPU {
+		return true, ""
+	}
+	if d.Driver == "" {
+		return false, "driverUnbound"
+	}
+	if d.RASUncorrectable > 0 {
+		return false, "uncorrectableEcc"
+	}
+	return true, ""
 }
 
 // Name returns the stable DNS-label device name, e.g. "gpu0".
@@ -142,6 +164,8 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 			PCIDevice: readHexID(filepath.Join(devDir, "device")),
 			Driver:    readLinkBase(filepath.Join(devDir, "driver")),
 			VRAMBytes: readUint(filepath.Join(devDir, "mem_info_vram_total")),
+
+			RASUncorrectable: readUint(filepath.Join(devDir, "ras", "ue_count")),
 		}
 		d.PCIAddr, d.PCIeRoot = pciAddress(devDir)
 		switch kind {

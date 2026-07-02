@@ -256,3 +256,25 @@ func TestBuildDevicesLLMFitBandwidthFallsBackToIndex(t *testing.T) {
 	}
 	t.Fatal("gpu0 not built")
 }
+
+func TestBuildDevicesHealth(t *testing.T) {
+	idx := mustIndex(t)
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "744c", Driver: "amdgpu", RASUncorrectable: 1},
+		{Kind: probe.KindGPU, Index: 1, PCIVendor: "8086", PCIDevice: "64a0"}, // no driver bound
+		{Kind: probe.KindCPU, Index: 0, SystemRAMBytes: systemRAM},
+	}, idx, systemRAM, nil)
+
+	byName := map[string]k8sDevice{}
+	for _, d := range devices {
+		byName[d.Name] = d
+	}
+	assertBool(t, byName["gpu0"].Attributes, "healthy", false)
+	assertStr(t, byName["gpu0"].Attributes, "healthReason", "uncorrectableEcc")
+	assertBool(t, byName["gpu1"].Attributes, "healthy", false)
+	assertStr(t, byName["gpu1"].Attributes, "healthReason", "driverUnbound")
+	assertBool(t, byName["cpu0"].Attributes, "healthy", true)
+	if _, ok := byName["cpu0"].Attributes["healthReason"]; ok {
+		t.Error("healthy device must not carry healthReason")
+	}
+}
