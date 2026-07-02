@@ -32,7 +32,8 @@ func main() {
 		nodeName   = flag.String("node-name", os.Getenv("NODE_NAME"), "node this agent runs on (default: NODE_NAME env)")
 		sysRoot    = flag.String("sys-root", envOr("LLMFIT_SYS_ROOT", "/sys"), "sysfs root (mount host /sys here in a container)")
 		procRoot   = flag.String("proc-root", envOr("LLMFIT_PROC_ROOT", "/proc"), "procfs root")
-		llmfitBin  = flag.String("llmfit-bin", envOr("LLMFIT_BIN", "llmfit"), "llmfit binary for capability assessment; empty disables")
+		llmfitBin  = flag.String("llmfit-bin", envOr("LLMFIT_BIN", "llmfit"), "llmfit binary for capability assessment (exec fallback); empty disables")
+		llmfitURL  = flag.String("llmfit-url", envOr("LLMFIT_URL", ""), "llmfit serve API (unix:///path.sock or http://…); preferred over exec when set")
 		interval   = flag.Duration("probe-interval", 60*time.Second, "re-probe cadence; slices update only when inventory changes")
 		nodePlugin = flag.Bool("kubelet-plugin", true, "serve the kubelet DRA plugin (NodePrepareResources → CDI); disable for publish-only")
 		cdiDir     = flag.String("cdi-dir", "/var/run/cdi", "dynamic CDI spec directory (host mount)")
@@ -42,13 +43,13 @@ func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *interval, *nodePlugin, *cdiDir, *taints, *vendors); err != nil {
+	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *llmfitURL, *interval, *nodePlugin, *cdiDir, *taints, *vendors); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
 }
 
-func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag string) error {
+func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag string) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
 	}
@@ -73,6 +74,13 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 
 	prober := probe.New(sysRoot, procRoot)
 	inv := nodeplugin.NewInventory()
+	// Capability source: serve API preferred, exec fallback, last-known-good
+	// within 10 minutes so a transient llmfit failure cannot flap published
+	// attributes (source llmfit -> index churn).
+	detector, err := llmfit.NewDetector(llmfitURL, llmfitBin, 10*time.Minute)
+	if err != nil {
+		return fmt.Errorf("configuring llmfit source: %w", err)
+	}
 	vendorDrivers := publisher.ParseVendorDrivers(vendorFlag)
 	opts := publisher.Options{Taints: taints}
 	// refreshOpts re-evaluates per-cycle facts that live outside sysfs.
@@ -88,7 +96,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 		opts.VendorManagedGPUs = vm
 	}
 	refreshOpts()
-	devices, resources, err := desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
+	devices, resources, err := desiredState(ctx, prober, idx, detector, nodeName, inv, opts)
 	if err != nil {
 		return err
 	}
@@ -132,7 +140,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 		case <-ticker.C:
 		}
 		refreshOpts()
-		devices, resources, err = desiredState(ctx, prober, idx, llmfitBin, nodeName, inv, opts)
+		devices, resources, err = desiredState(ctx, prober, idx, detector, nodeName, inv, opts)
 		if err != nil {
 			klog.ErrorS(err, "re-probe failed; keeping previous inventory")
 			continue
@@ -150,7 +158,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin string, interval tim
 	}
 }
 
-func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, llmfitBin, nodeName string, inv *nodeplugin.Inventory, opts publisher.Options) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
+func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, detector *llmfit.Detector, nodeName string, inv *nodeplugin.Inventory, opts publisher.Options) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
 	probed, err := prober.Walk()
 	if err != nil {
 		return nil, nil, fmt.Errorf("device tree walk: %w", err)
@@ -164,15 +172,12 @@ func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, l
 	}
 	// llmfit is the preferred capability source; degrade to the embedded
 	// index rather than failing the whole publish if it breaks.
-	var sys *llmfit.System
-	if llmfitBin != "" {
-		sys, err = llmfit.Detect(ctx, llmfitBin)
-		if err != nil {
-			klog.ErrorS(err, "llmfit detection failed; falling back to embedded index")
-			sys = nil
-		} else {
-			klog.V(2).InfoS("llmfit capability assessment", "cpu", sys.CPUName, "gpus", len(sys.GPUs))
-		}
+	sys, err := detector.Detect(ctx)
+	if err != nil {
+		klog.ErrorS(err, "llmfit detection failed; falling back to embedded index")
+		sys = nil
+	} else {
+		klog.V(2).InfoS("llmfit capability assessment", "cpu", sys.CPUName, "gpus", len(sys.GPUs))
 	}
 	devices := publisher.BuildDevices(probed, idx, ram, sys, opts)
 	return devices, publisher.BuildResources(nodeName, devices), nil

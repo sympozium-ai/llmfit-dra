@@ -9,6 +9,20 @@ image:
 imagePullSecrets:
   - ghcr-pull
 
+# Long-lived `llmfit serve` sidecar: the driver consumes capability over
+# its versioned REST API on a pod-private Unix socket (no host port — the
+# pod is hostNetwork). When disabled, the driver falls back to execing the
+# llmfit binary each probe cycle.
+llmfitSidecar:
+  enabled: true
+  socketPath: /run/llmfit/llmfit.sock
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
 # Driver flags.
 probeInterval: 30s
 logVerbosity: 2

@@ -274,6 +274,13 @@ if [ "$HAS_GPU" = 1 ]; then
 else
   pass "llmfit assessed cpu0 (no GPU on this node)"
 fi
+# The capability must have arrived over the serve API (AF_UNIX sidecar),
+# not the exec fallback — and the sidecar must be healthy.
+driver_exec curl -sf --unix-socket /run/llmfit/llmfit.sock http://localhost/health >/dev/null \
+  || fail "llmfit sidecar socket not serving /health"
+kubectl -n "$NS" logs ds/llmfit-dra -c llmfit-dra | grep -q 'llmfit capability transport" transport="api"' \
+  || fail "driver did not use the API transport (exec fallback or index in use?)"
+pass "capability flows over the AF_UNIX serve API (sidecar healthy)"
 
 echo "== Scenario 6: cpu0 claim is env-only (runs anywhere, no accelerator needed)"
 # cpu0 is exclusive; in CPU-only mode scenario 4's consumer holds it.

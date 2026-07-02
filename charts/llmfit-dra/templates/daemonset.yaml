@@ -52,6 +52,9 @@ spec:
             - --kubelet-plugin={{ .Values.kubeletPlugin }}
             - --cdi-dir={{ .Values.cdiDir }}
             - --vendor-drivers={{ .Values.vendorDrivers }}
+            {{- if .Values.llmfitSidecar.enabled }}
+            - --llmfit-url=unix://{{ .Values.llmfitSidecar.socketPath }}
+            {{- end }}
             {{- if .Values.publishTaints }}
             - --publish-taints
             {{- end }}
@@ -75,8 +78,31 @@ spec:
               mountPath: /var/lib/kubelet/plugins_registry
             - name: cdi
               mountPath: {{ .Values.cdiDir }}
+            {{- if .Values.llmfitSidecar.enabled }}
+            - name: llmfit-sock
+              mountPath: {{ dir .Values.llmfitSidecar.socketPath }}
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.llmfitSidecar.enabled }}
+        # Capability source: the same image, running the versioned REST API
+        # over a pod-private Unix socket. UDS (not TCP) because this pod is
+        # hostNetwork — a port would bind the NODE's loopback.
+        - name: llmfit
+          image: {{ include "llmfit-dra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/llmfit", "serve", "--unix-socket", {{ .Values.llmfitSidecar.socketPath | quote }}]
+          livenessProbe:
+            exec:
+              command: ["curl", "-sf", "--unix-socket", {{ .Values.llmfitSidecar.socketPath | quote }}, "http://localhost/health"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          volumeMounts:
+            - name: llmfit-sock
+              mountPath: {{ dir .Values.llmfitSidecar.socketPath }}
+          resources:
+            {{- toYaml .Values.llmfitSidecar.resources | nindent 12 }}
+        {{- end }}
       volumes:
         - name: sysfs
           hostPath:
@@ -96,3 +122,7 @@ spec:
           hostPath:
             path: {{ .Values.cdiDir }}
             type: DirectoryOrCreate
+        {{- if .Values.llmfitSidecar.enabled }}
+        - name: llmfit-sock
+          emptyDir: {}
+        {{- end }}

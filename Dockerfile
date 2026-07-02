@@ -21,10 +21,11 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /llmfit-dra ./cmd/llmfi
 # (bookworm's 2023 database names Strix Halo just "AMD/ATI"). update-pciids
 # pulls the latest database at build time.
 FROM debian:trixie-slim
+# curl stays: the llmfit sidecar's liveness probe execs
+# `curl --unix-socket … /health` (kubelet httpGet can't target a UDS).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pciutils curl ca-certificates \
     && update-pciids \
-    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=llmfit-build /src/target/release/llmfit /usr/local/bin/llmfit
 COPY --from=build /llmfit-dra /llmfit-dra
