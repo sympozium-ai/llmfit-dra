@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.6](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.5...v0.2.6) (2026-07-03)
+
+
+### Features
+
+* ModelClaim CRD + controller — request hardware by model capability ([67b73c7](https://github.com/sympozium-ai/llmfit-dra/commit/67b73c7b928fc9d2451eb4bc3644861958cc6d3a))
+* ModelClaim CRD + controller — request hardware by model capability (M1) ([9d71fe1](https://github.com/sympozium-ai/llmfit-dra/commit/9d71fe10e1a2616aa12d3d71cb02570b81f2be60))
+
+
+### Bug Fixes
+
+* **chart:** use explicit selector labels; design doc status -&gt; accepted ([8abfd9b](https://github.com/sympozium-ai/llmfit-dra/commit/8abfd9b2a87cd0a8eff3faffc63eb5cedfad2962))
+* controller pods must not match the DaemonSet's selector labels ([67760e9](https://github.com/sympozium-ai/llmfit-dra/commit/67760e9a3c9d49972d2220551749ed3966dfd8f4))
+* **e2e:** Scenario 5 API-transport window is racy on fresh deploys ([44bb160](https://github.com/sympozium-ai/llmfit-dra/commit/44bb160130a4b1ae27533f0467646104fce03232))
+* **e2e:** widen Scenario 5 API-transport window 60s-&gt;180s (flaky on fresh deploys) ([1b1fbb7](https://github.com/sympozium-ai/llmfit-dra/commit/1b1fbb7839fd4cdf4a4916dcba480ec8deccc0a6))
+
 ## [0.2.5](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.4...v0.2.5) (2026-07-03)
 
 
