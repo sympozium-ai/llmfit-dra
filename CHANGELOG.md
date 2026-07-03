@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.7](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.6...v0.2.7) (2026-07-03)
+
+
+### Features
+
+* **modelclaim:** allocation-aware Satisfiable — available count and holder ([6e6bc17](https://github.com/sympozium-ai/llmfit-dra/commit/6e6bc17cc2b6d502a3d26dccd38b7be63fc842fd))
+* **modelclaim:** allocation-aware Satisfiable (closes [#21](https://github.com/sympozium-ai/llmfit-dra/issues/21)) ([8b2da49](https://github.com/sympozium-ai/llmfit-dra/commit/8b2da490275eafeb141e308ebabd0c1ceb64f43a))
+
+
+### Bug Fixes
+
+* **release:** draft releases + docs: sympozium integration design ([e8dcabf](https://github.com/sympozium-ai/llmfit-dra/commit/e8dcabf99036bb3d1ecde4434e9fb8208f6990cf))
+* **release:** publish releases only after image and chart exist ([933acb9](https://github.com/sympozium-ai/llmfit-dra/commit/933acb95c8e5061e1e2a16a9aa8de6c71a0c8d8c))
+
 ## [0.2.6](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.5...v0.2.6) (2026-07-03)
 
 
