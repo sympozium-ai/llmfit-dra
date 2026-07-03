@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.5](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.4...v0.2.5) (2026-07-03)
+
+
+### Bug Fixes
+
+* **e2e:** widen Scenario 8 restart timeout (flaky, not a regression) ([161582b](https://github.com/sympozium-ai/llmfit-dra/commit/161582bd3637492465bdcbae8e64007a4efc7239))
+* **e2e:** widen Scenario 8 restart timeout 120s→300s (flaky) ([febfec8](https://github.com/sympozium-ai/llmfit-dra/commit/febfec80ec07dbd2352a9f3ea6446367125376d5))
+
 ## [0.2.4](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.3...v0.2.4) (2026-07-03)
 
 
