@@ -14,11 +14,29 @@ and a CPU fallback — as typed **ResourceSlices**, and a kubelet plugin that
 wires the allocated device into your pod via CDI. The stock kube-scheduler
 does the placement; no custom scheduler, no annotations, no webhooks.
 
+The request you actually have is a model, not a device — so that's the API:
+
+```yaml
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata: { name: qwen36 }
+spec:
+  model: Qwen/Qwen3.6-30B-A3B
+  minTps: 20
 ```
-llmfit claim <model> ──► ResourceClaim (fit as CEL) ──► kube-scheduler picks
-the node/device whose physics satisfy it ──► kubelet plugin injects
-/dev nodes + env ──► your pod runs on silicon that can actually hold the model
+
 ```
+ModelClaim "run Qwen3.6 at ≥20 tok/s"
+   ──► controller resolves weights + bandwidth floor from llmfit's model DB
+   ──► same-named ResourceClaimTemplate (the physics, inlined as CEL)
+   ──► kube-scheduler picks the node/device that satisfies it
+   ──► kubelet plugin injects /dev nodes + env
+   ──► your pod runs on silicon that can actually hold the model
+```
+
+No other DRA driver can take that request. And when *nothing* fits,
+`kubectl describe modelclaim` says exactly why (`closest device gpu-…:
+bandwidth 256 < 640 GB/s`) — before any pod exists.
 
 ## Getting started
 

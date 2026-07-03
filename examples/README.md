@@ -18,19 +18,31 @@ The four kind DeviceClasses (`cpu.llmfit.ai`, `gpu.llmfit.ai`,
 a claim selects **device entries** out of a node's slice, filtered by the
 class and any CEL you add.
 
-## The examples, easiest first
+## The examples — start with the ModelClaim
 
 | File | What it asks for | Runs on |
 |------|------------------|---------|
+| [`00-modelclaim.yaml`](00-modelclaim.yaml) | **a device that can run a model** (ModelClaim) | any — status explains fit |
 | [`01-cpu-claim.yaml`](01-cpu-claim.yaml) | the CPU device, by class alone | every node |
 | [`02-gpu-claim.yaml`](02-gpu-claim.yaml) | any healthy GPU, by class alone | nodes with a GPU |
 | [`03-gpu-with-min-memory.yaml`](03-gpu-with-min-memory.yaml) | a GPU with ≥ 16Gi memory (class + CEL) | nodes with a big-enough GPU |
 | [`04-npu-claim.yaml`](04-npu-claim.yaml) | the NPU device, by class alone | nodes with an NPU |
 | [`05-gpu-plus-npu-aligned.yaml`](05-gpu-plus-npu-aligned.yaml) | a GPU **and** NPU on the same PCIe root | nodes with both |
-| [`06-modelclaim.yaml`](06-modelclaim.yaml) | **a device that can run a model** (ModelClaim) | any — status explains fit |
 
-Most nodes have at least a CPU and a GPU, so **01 and 02 are the ones to
-start with**:
+**`00-modelclaim.yaml` is the intended way in** — name the model, let the
+physics pick the device:
+
+```sh
+kubectl apply -f 00-modelclaim.yaml
+kubectl get modelclaim qwen-coder            # RESOLVED / SATISFIABLE at a glance
+kubectl describe modelclaim qwen-coder       # bounds, candidates, or the shortfall
+kubectl logs llmfit-modelclaim-demo          # LLMFIT_DEVICE=… once Running
+kubectl delete -f 00-modelclaim.yaml
+```
+
+The numbered device-kind claims (01–05) are the granular vocabulary
+underneath — useful when you want a *specific* device rather than a model
+fit. Most nodes have at least a CPU and a GPU, so 01 and 02 run anywhere:
 
 ```sh
 kubectl apply -f 02-gpu-claim.yaml
@@ -46,7 +58,7 @@ not an error.
 ## Ask for a model, not a device (ModelClaim)
 
 Instead of naming a device, name the **model** — the capability no other
-DRA driver has. Declaratively, with `06-modelclaim.yaml`:
+DRA driver has. Declaratively, with `00-modelclaim.yaml`:
 
 ```yaml
 apiVersion: llmfit.ai/v1alpha1
