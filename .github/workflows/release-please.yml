@@ -16,11 +16,17 @@ jobs:
       # the default GITHUB_TOKEN does not trigger the build workflow, so the
       # release would ship no image and no chart (a silent hollow release).
       # Fail loudly at the top rather than discover it after the merge.
+      # The check lives in the shell because the `secrets` context is not
+      # available in `if:` conditions — referencing it there is a workflow
+      # validation error.
       - name: Require RELEASE_TOKEN
-        if: ${{ secrets.RELEASE_TOKEN == '' }}
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          echo "::error::RELEASE_TOKEN secret is unset — release tags will not trigger the build/chart workflow. Add a PAT with 'contents: write' + 'workflow'." >&2
-          exit 1
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN secret is unset — release tags will not trigger the build/chart workflow. Add a PAT with 'contents: write' + 'workflow'." >&2
+            exit 1
+          fi
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
