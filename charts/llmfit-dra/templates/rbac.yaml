@@ -30,6 +30,20 @@ rules:
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims"]
     verbs: ["get", "list"]
+  # ModelClaim controller: reconcile ModelClaims into same-named
+  # ResourceClaimTemplates and report status/satisfiability.
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaimtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

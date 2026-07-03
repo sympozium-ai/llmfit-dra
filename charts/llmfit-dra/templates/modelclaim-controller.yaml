@@ -1,0 +1,52 @@
+{{- if .Values.modelClaimController.enabled }}
+# ModelClaim controller: reconciles ModelClaims (llmfit.ai/v1alpha1) into
+# same-named ResourceClaimTemplates (docs/design/modelclaim.md). A plain
+# Deployment — cluster-scoped reconciliation with NONE of the DaemonSet's
+# host privileges. If it's down, existing templates keep stamping per-pod
+# claims; only new/edited ModelClaims wait.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelclaim-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "llmfit-dra.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: modelclaim-controller
+  template:
+    metadata:
+      labels:
+        {{- include "llmfit-dra.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: modelclaim-controller
+    spec:
+      serviceAccountName: {{ include "llmfit-dra.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: modelclaim-controller
+          image: {{ include "llmfit-dra.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --controller
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.modelClaimController.resources | nindent 12 }}
+{{- end }}

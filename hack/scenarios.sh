@@ -107,8 +107,9 @@ cleanup10() { kubectl delete --ignore-not-found --grace-period=1 deployment/llmf
 cleanup11() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-aligned-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-aligned-claim >/dev/null 2>&1; }
 cleanup13() { kubectl delete --ignore-not-found resourceslice/fake-vendor-slice pod/llmfit-coexist-consumer resourceclaim/llmfit-coexist-claim >/dev/null 2>&1; }
 cleanup15() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-compute >/dev/null 2>&1; kubectl delete --ignore-not-found resourceclaim/llmfit-compute-claim >/dev/null 2>&1; }
+cleanup16() { kubectl delete --ignore-not-found --grace-period=1 pod/llmfit-mc-consumer >/dev/null 2>&1; kubectl delete --ignore-not-found modelclaim/llmfit-mc-test modelclaim/llmfit-mc-bogus >/dev/null 2>&1; }
 cleanup_host() { kubectl -n kube-system delete pod scenario-host --ignore-not-found --grace-period=1 >/dev/null 2>&1; }
-trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup13; cleanup15; cleanup_host' EXIT
+trap 'cleanup; cleanup6; cleanup7; cleanup8; cleanup9; cleanup10; cleanup11; cleanup13; cleanup15; cleanup16; cleanup_host' EXIT
 
 echo "== Scenario 1: publish"
 kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=120s >/dev/null
@@ -699,6 +700,103 @@ EOF
   pass "Vulkan enumerated the claimed device:${gpu_line}"
 else
   echo "  SKIP: needs a fit-capable GPU"
+fi
+
+echo "== Scenario 16: ModelClaim — 'run <model>' as a Kubernetes object"
+# The controller resolves the model via the in-image llmfit binary and
+# reconciles a SAME-NAMED ResourceClaimTemplate. On CPU-only CI nodes cpu0
+# publishes no memoryBandwidthGBs, so the honest outcome is Resolved=True +
+# Satisfiable=False with a bandwidth shortfall — this asserts the full loop
+# INCLUDING the refusal path, no GPU required. On fit-capable GPU nodes it
+# additionally proves template -> pod Running.
+if kubectl get crd modelclaims.llmfit.ai >/dev/null 2>&1 \
+   && kubectl -n "$NS" get deploy -l app.kubernetes.io/component=modelclaim-controller -o name 2>/dev/null | grep -q .; then
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: llmfit-mc-test
+spec:
+  model: Qwen/Qwen2.5-Coder-3B-Instruct
+  minTps: 15
+EOF
+
+  resolved=""
+  for i in $(seq 1 30); do
+    resolved=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.conditions[?(@.type=="Resolved")].status}' 2>/dev/null)
+    [ "$resolved" = "True" ] && break
+    sleep 2
+  done
+  [ "$resolved" = "True" ] || { kubectl get modelclaim llmfit-mc-test -o yaml | tail -20; fail "ModelClaim did not resolve"; }
+
+  mem=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.resolved.memoryGi}')
+  bw=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.resolved.minBandwidthGBs}')
+  [ -n "$mem" ] && [ "$mem" -gt 0 ] || fail "resolved.memoryGi missing"
+  [ -n "$bw" ] && [ "$bw" -gt 0 ] || fail "resolved.minBandwidthGBs missing"
+  pass "resolved: memory>=${mem}Gi bandwidth>=${bw}GB/s"
+
+  # The same-named template must exist, owned by the ModelClaim, with the
+  # resolved constants inlined in its CEL.
+  cel=$(kubectl get resourceclaimtemplate llmfit-mc-test -o jsonpath='{.spec.spec.devices.requests[0].exactly.selectors[0].cel.expression}')
+  echo "$cel" | grep -q "quantity('${mem}Gi')" || fail "template CEL missing memory bound: $cel"
+  echo "$cel" | grep -q "memoryBandwidthGBs >= ${bw}" || fail "template CEL missing bandwidth bound: $cel"
+  owner=$(kubectl get resourceclaimtemplate llmfit-mc-test -o jsonpath='{.metadata.ownerReferences[0].kind}')
+  [ "$owner" = "ModelClaim" ] || fail "template not owned by the ModelClaim (owner=$owner)"
+  pass "same-named ResourceClaimTemplate reconciled with resolved bounds"
+
+  sat=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.conditions[?(@.type=="Satisfiable")].status}')
+  cand=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.candidates.devices}')
+  if [ "$HAS_GPU" = 1 ] && [ "$sat" = "True" ]; then
+    # Fit-capable node: prove the template stamps a claim and the pod runs.
+    kubectl apply -f - <<EOF >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-mc-consumer
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sleep", "600"]
+      resources:
+        claims: [{ name: model }]
+  resourceClaims:
+    - name: model
+      resourceClaimTemplateName: llmfit-mc-test
+EOF
+    kubectl wait --for=condition=Ready pod/llmfit-mc-consumer --timeout=120s >/dev/null \
+      || fail "ModelClaim-templated pod did not run on a satisfiable cluster"
+    pass "satisfiable (${cand} device(s)) and templated pod reached Running"
+  else
+    # CPU-only cluster: the honest verdict is an explained refusal.
+    [ "$sat" = "False" ] || fail "expected Satisfiable=False on a CPU-only cluster, got '$sat'"
+    msg=$(kubectl get modelclaim llmfit-mc-test -o jsonpath='{.status.conditions[?(@.type=="Satisfiable")].message}')
+    echo "$msg" | grep -qiE "bandwidth|no llmfit" || fail "shortfall message not explanatory: $msg"
+    pass "unsatisfiable cluster correctly explained: $msg"
+  fi
+
+  # Unknown model: async semantic validation via the Resolved condition.
+  kubectl apply -f - <<EOF >/dev/null
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: llmfit-mc-bogus
+spec:
+  model: no-such-org/definitely-not-a-model
+EOF
+  bogus=""
+  for i in $(seq 1 30); do
+    bogus=$(kubectl get modelclaim llmfit-mc-bogus -o jsonpath='{.status.conditions[?(@.type=="Resolved")].status}' 2>/dev/null)
+    [ "$bogus" = "False" ] && break
+    sleep 2
+  done
+  [ "$bogus" = "False" ] || fail "unknown model should set Resolved=False"
+  kubectl get resourceclaimtemplate llmfit-mc-bogus >/dev/null 2>&1 && fail "no template must exist for an unresolved ModelClaim"
+  pass "unknown model refused asynchronously (Resolved=False, no template)"
+else
+  echo "  SKIP: ModelClaim CRD/controller not installed"
 fi
 
 echo

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -21,6 +22,7 @@ import (
 	"github.com/sympozium-ai/llmfit-dra/internal/hotplug"
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
+	"github.com/sympozium-ai/llmfit-dra/internal/modelclaim"
 	"github.com/sympozium-ai/llmfit-dra/internal/nodeplugin"
 	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 	"github.com/sympozium-ai/llmfit-dra/internal/probe"
@@ -41,14 +43,48 @@ func main() {
 		taints      = flag.Bool("publish-taints", false, "taint unhealthy devices NoSchedule (requires the DRADeviceTaints feature gate)")
 		vendors     = flag.String("vendor-drivers", publisher.DefaultVendorDrivers, "DRA drivers that own GPU allocation; their presence on this node demotes our GPUs to fitness-only (empty disables)")
 		metricsAddr = flag.String("metrics-addr", envOr("METRICS_ADDR", ":9099"), "address for the /metrics, /healthz and /readyz server")
+		controller  = flag.Bool("controller", false, "run the cluster-scoped ModelClaim controller instead of the per-node agent (Deployment, not DaemonSet)")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
+
+	if *controller {
+		if err := runController(*kubeconfig, *llmfitBin); err != nil {
+			klog.ErrorS(err, "llmfit-dra modelclaim controller failed")
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(*kubeconfig, *nodeName, *sysRoot, *procRoot, *llmfitBin, *llmfitURL, *interval, *nodePlugin, *cdiDir, *taints, *vendors, *metricsAddr); err != nil {
 		klog.ErrorS(err, "llmfit-dra failed")
 		os.Exit(1)
 	}
+}
+
+// runController is the --controller mode: cluster-scoped ModelClaim →
+// ResourceClaimTemplate reconciliation. Deliberately not part of the
+// DaemonSet run: it needs none of the host privileges (hostNetwork,
+// NET_ADMIN, /sys) the per-node agent holds.
+func runController(kubeconfig, llmfitBin string) error {
+	cfg, err := buildConfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("building kube config: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("building kube client: %w", err)
+	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("building dynamic client: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	resolver := &modelclaim.ExecResolver{Bin: llmfitBin}
+	return modelclaim.New(dyn, client, resolver).Run(ctx, 2)
 }
 
 func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag, metricsAddr string) error {

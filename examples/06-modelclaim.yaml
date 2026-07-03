@@ -1,0 +1,41 @@
+# Request hardware by MODEL, not by device — the thing only llmfit-dra
+# can do. Name the model; the controller resolves its weights size and
+# bandwidth floor from llmfit's database and maintains a same-named
+# ResourceClaimTemplate with the physics inlined as CEL.
+#
+#   kubectl apply -f 06-modelclaim.yaml
+#   kubectl get modelclaim qwen-coder        # RESOLVED / SATISFIABLE columns
+#   kubectl describe modelclaim qwen-coder   # bounds, candidates, or the
+#                                            # exact shortfall ("bandwidth
+#                                            # 256 < 640 GB/s on node X")
+#
+# The pod below references the template by the SAME NAME as the ModelClaim —
+# no discovery step. If no device on the cluster satisfies the physics, the
+# ModelClaim says so in its Satisfiable condition (and the pod would stay
+# Pending — the honest answer).
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-coder
+spec:
+  model: Qwen/Qwen2.5-Coder-3B-Instruct
+  minTps: 15
+  # Optional: quant: Q4_K_M · efficiencyPct: 55 · deviceClassName: gpu.llmfit.ai
+  # extraSelectors: ["device.attributes['llmfit.ai'].unifiedMemory"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-modelclaim-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo '--- llmfit env ---'; env | grep LLMFIT_ || echo '(none)'; sleep 3600"]
+      resources:
+        claims:
+          - name: model
+  resourceClaims:
+    - name: model
+      resourceClaimTemplateName: qwen-coder   # == the ModelClaim's name

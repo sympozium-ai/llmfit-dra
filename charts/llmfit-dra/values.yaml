@@ -70,3 +70,15 @@ resources:
     memory: 192Mi
   limits:
     memory: 192Mi
+
+# ModelClaim controller: reconciles ModelClaim objects into same-named
+# ResourceClaimTemplates ("run Qwen3.6" as a Kubernetes object — see
+# docs/design/modelclaim.md and examples/06-modelclaim.yaml).
+modelClaimController:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
