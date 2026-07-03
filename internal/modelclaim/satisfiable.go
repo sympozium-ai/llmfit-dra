@@ -12,9 +12,36 @@ import (
 type Candidates struct {
 	Devices int
 	Nodes   int
+	// Available is the subset of Devices not currently held by an allocated
+	// ResourceClaim. Physics-satisfiable vs available-right-now is exactly
+	// the distinction an operator needs when a pod is Pending: Devices == 0
+	// means "never (as published)"; Available == 0 means "queue or scale"
+	// (issue #21).
+	Available int
+	// HeldBy names an example holder (namespace/name) when matching devices
+	// exist but none are available.
+	HeldBy string
 	// Shortfall explains the nearest miss when Devices == 0 — the answer to
 	// "why would my pod be Pending" before any pod exists.
 	Shortfall string
+}
+
+// AllocatedDevices maps "pool/device" keys held by allocated ResourceClaims
+// for this driver to their holder ("namespace/name").
+func AllocatedDevices(claims []*resourceapi.ResourceClaim) map[string]string {
+	held := map[string]string{}
+	for _, rc := range claims {
+		if rc.Status.Allocation == nil {
+			continue
+		}
+		for _, r := range rc.Status.Allocation.Devices.Results {
+			if r.Driver != DriverDomain {
+				continue
+			}
+			held[r.Pool+"/"+r.Device] = rc.Namespace + "/" + rc.Name
+		}
+	}
+	return held
 }
 
 // kindForClass mirrors the shipped DeviceClass selectors: the kind classes
@@ -36,12 +63,14 @@ func kindForClass(deviceClassName string) string {
 // ResourceSlices. The generated constraint is a known inequality — memory,
 // bandwidth, healthy — so no CEL engine is needed; this stays a cheap,
 // advisory computation (it never gates template creation).
-func EvaluateSlices(slices []*resourceapi.ResourceSlice, b *Bounds, deviceClassName string) Candidates {
+func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]string, b *Bounds, deviceClassName string) Candidates {
 	wantKind := kindForClass(deviceClassName)
 	memFloor := int64(b.MemoryGi) * 1024 * 1024 * 1024
 
 	nodes := map[string]bool{}
 	devices := 0
+	available := 0
+	heldBy := ""
 	bestMsg := ""
 	bestScore := -1.0 // higher = closer to satisfying
 
@@ -88,6 +117,14 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, b *Bounds, deviceClassN
 				if node != "" {
 					nodes[node] = true
 				}
+				key := slice.Spec.Pool.Name + "/" + dev.Name
+				if holder, held := allocated[key]; held {
+					if heldBy == "" {
+						heldBy = holder
+					}
+				} else {
+					available++
+				}
 				continue
 			}
 
@@ -125,7 +162,7 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, b *Bounds, deviceClassN
 		}
 	}
 
-	c := Candidates{Devices: devices, Nodes: len(nodes)}
+	c := Candidates{Devices: devices, Nodes: len(nodes), Available: available, HeldBy: heldBy}
 	if devices == 0 {
 		if bestMsg == "" {
 			bestMsg = "no llmfit.ai devices published"

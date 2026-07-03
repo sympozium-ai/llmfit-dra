@@ -40,6 +40,9 @@ spec:
         - name: Devices
           type: integer
           jsonPath: .status.candidates.devices
+        - name: Available
+          type: integer
+          jsonPath: .status.candidates.available
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -112,6 +115,7 @@ spec:
                   properties:
                     devices: { type: integer }
                     nodes: { type: integer }
+                    available: { type: integer }
                 conditions:
                   type: array
                   x-kubernetes-list-type: map
