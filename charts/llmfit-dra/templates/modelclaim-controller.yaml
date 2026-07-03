@@ -16,13 +16,13 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}
+      app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
       app.kubernetes.io/instance: {{ .Release.Name }}
       app.kubernetes.io/component: modelclaim-controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}
+        app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: modelclaim-controller
     spec:

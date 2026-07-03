@@ -51,12 +51,12 @@ our_slice() { slices_json | jq --arg d "$DRIVER" '[.items[] | select(.spec.drive
 driver_exec_on() {
   local target=$1 pod
   shift
-  pod=$(kubectl -n "$NS" get pod --field-selector="spec.nodeName=$target,status.phase=Running" -o name | head -1)
+  pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=llmfit-dra --field-selector="spec.nodeName=$target,status.phase=Running" -o name | head -1)
   kubectl -n "$NS" exec "${pod#pod/}" -- "$@"
 }
 driver_exec() {
   local pod
-  pod=$(kubectl -n "$NS" get pod --field-selector=status.phase=Running -o name | head -1)
+  pod=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=llmfit-dra --field-selector=status.phase=Running -o name | head -1)
   kubectl -n "$NS" exec "${pod#pod/}" -- "$@"
 }
 
