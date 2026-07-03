@@ -28,6 +28,7 @@ class and any CEL you add.
 | [`03-gpu-with-min-memory.yaml`](03-gpu-with-min-memory.yaml) | a GPU with ≥ 16Gi memory (class + CEL) | nodes with a big-enough GPU |
 | [`04-npu-claim.yaml`](04-npu-claim.yaml) | the NPU device, by class alone | nodes with an NPU |
 | [`05-gpu-plus-npu-aligned.yaml`](05-gpu-plus-npu-aligned.yaml) | a GPU **and** NPU on the same PCIe root | nodes with both |
+| [`07-disaggregated-prefill-decode.yaml`](07-disaggregated-prefill-decode.yaml) | **a prefill pool and a decode pool**, each by its role's physics | multi-node fleets |
 
 **`00-modelclaim.yaml` is the intended way in** — name the model, let the
 physics pick the device:
@@ -87,6 +88,43 @@ inequality (memory ≥ weights, bandwidth ≥ the floor for your target tok/s,
 healthy) — or nothing, if the node genuinely can't run it at that speed.
 Add `--template` to emit a `ResourceClaimTemplate` for a Deployment instead
 of a one-shot claim.
+
+## Real-world shape: disaggregated prefill/decode
+
+[`07-disaggregated-prefill-decode.yaml`](07-disaggregated-prefill-decode.yaml)
+shows how a production serving topology falls out of ModelClaims naturally.
+Prefill and decode want opposite hardware — prefill is compute-bound and
+memory-hungry (long-context KV), decode is pure memory bandwidth (which is
+exactly what `minTps` encodes) — so each role gets its own ModelClaim for
+the **same model**, and the scheduler sorts a heterogeneous fleet into
+pools with no node labels or affinity rules:
+
+- `qwen-decode`: `minTps: 25`, `deviceClassName: gpu.llmfit.ai` — the
+  bandwidth floor picks the fast silicon, never the CPU fallback.
+- `qwen-prefill`: `minTps: 5` + an `extraSelectors` memory floor — fits
+  anywhere with enough room for deep KV.
+
+The KV-transfer path between pools (NIXL/UCX, vLLM's
+`--kv-transfer-config`, Dynamo) belongs to the serving layer inside the
+containers — llmfit-dra places the roles and stays out of the data path.
+
+**Co-located variant** (single node with two accelerators — e.g. GPU +
+NPU): one claim, two requests, aligned on the PCIe root, and each
+container binds its own request by name:
+
+```yaml
+spec:
+  resourceClaims:
+    - name: accel
+      resourceClaimName: pd-aligned-claim   # requests: prefill, decode (05-style)
+  containers:
+    - name: prefill
+      resources:
+        claims: [{ name: accel, request: prefill }]
+    - name: decode
+      resources:
+        claims: [{ name: accel, request: decode }]
+```
 
 ## Using a claim from your own pod
 
