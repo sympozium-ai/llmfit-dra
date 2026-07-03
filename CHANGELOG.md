@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.3](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.2...v0.2.3) (2026-07-03)
+
+
+### Bug Fixes
+
+* bump llmfit submodule to v0.9.36 — multi-GPU and Intel iGPU detection fixes ([d9a220f](https://github.com/sympozium-ai/llmfit-dra/commit/d9a220f4fa5872c1ab0085766580367756f8a69c))
+* bump llmfit submodule to v0.9.36 (multi-GPU + Intel detection fixes) ([1d1f904](https://github.com/sympozium-ai/llmfit-dra/commit/1d1f90442db4d7081571f909ff490d42cc91d8fa))
+* **ci:** move RELEASE_TOKEN guard into the shell — secrets is not a valid if: context ([a43e7b3](https://github.com/sympozium-ai/llmfit-dra/commit/a43e7b32bd41aae29ecff6ea09ae4678e63b7d66))
+* **ci:** RELEASE_TOKEN guard — secrets is not a valid if: context ([5ce13f9](https://github.com/sympozium-ai/llmfit-dra/commit/5ce13f9af893c0cff075c22918fc3752f72219ed))
+
 ## [0.2.2](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.1...v0.2.2) (2026-07-02)
 
 
