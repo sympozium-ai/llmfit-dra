@@ -1,0 +1,81 @@
+# Examples
+
+Copy-paste ResourceClaims for requesting devices from `llmfit-dra`. Each
+file is self-contained (claim + a busybox pod that prints the injected
+`LLMFIT_*` env), so you can apply it, watch it schedule, and see what the
+kubelet plugin handed the container.
+
+**Prerequisite:** the driver installed (see the repo README) and a cluster
+on Kubernetes ≥ 1.34. First, look at what your nodes actually published —
+this is your menu:
+
+```sh
+kubectl get resourceslices -o yaml   # one slice per node; .spec.devices[] lists cpu0, gpu0, npu0…
+```
+
+The four kind DeviceClasses (`cpu.llmfit.ai`, `gpu.llmfit.ai`,
+`npu.llmfit.ai`, and the generic `llmfit.ai`) are the request vocabulary;
+a claim selects **device entries** out of a node's slice, filtered by the
+class and any CEL you add.
+
+## The examples, easiest first
+
+| File | What it asks for | Runs on |
+|------|------------------|---------|
+| [`01-cpu-claim.yaml`](01-cpu-claim.yaml) | the CPU device, by class alone | every node |
+| [`02-gpu-claim.yaml`](02-gpu-claim.yaml) | any healthy GPU, by class alone | nodes with a GPU |
+| [`03-gpu-with-min-memory.yaml`](03-gpu-with-min-memory.yaml) | a GPU with ≥ 16Gi memory (class + CEL) | nodes with a big-enough GPU |
+| [`04-npu-claim.yaml`](04-npu-claim.yaml) | the NPU device, by class alone | nodes with an NPU |
+| [`05-gpu-plus-npu-aligned.yaml`](05-gpu-plus-npu-aligned.yaml) | a GPU **and** NPU on the same PCIe root | nodes with both |
+
+Most nodes have at least a CPU and a GPU, so **01 and 02 are the ones to
+start with**:
+
+```sh
+kubectl apply -f 02-gpu-claim.yaml
+kubectl wait --for=condition=Ready pod/llmfit-gpu-demo --timeout=120s
+kubectl logs llmfit-gpu-demo        # --- llmfit env ---  LLMFIT_DEVICE=gpu0
+kubectl delete -f 02-gpu-claim.yaml
+```
+
+If a device isn't present the pod stays **Pending** ("cannot allocate all
+claims") — that's the honest signal that the node can't satisfy the request,
+not an error.
+
+## Bonus: ask for a model, not a device
+
+Instead of naming a device, name the **model** and let the physics pick.
+The generator (shipped in the driver image) resolves the model's weight
+size and bandwidth floor from llmfit's database and writes the fit CEL for
+you:
+
+```sh
+kubectl -n llmfit-dra exec ds/llmfit-dra -- \
+  llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -
+```
+
+The emitted claim lands on whichever device on the node satisfies the
+inequality (memory ≥ weights, bandwidth ≥ the floor for your target tok/s,
+healthy) — or nothing, if the node genuinely can't run it at that speed.
+Add `--template` to emit a `ResourceClaimTemplate` for a Deployment instead
+of a one-shot claim.
+
+## Using a claim from your own pod
+
+Every example wires the pod to the claim the same way — the request `name`
+inside the claim is what `resources.claims` references:
+
+```yaml
+spec:
+  resourceClaims:
+    - name: accel
+      resourceClaimName: gpu-claim      # any claim from above
+  containers:
+    - name: main
+      image: your/image
+      resources:
+        claims: [{ name: accel }]
+```
+
+The kubelet plugin injects `LLMFIT_DEVICE=<name>` (env-only for CPU; env +
+`/dev` nodes for GPU/NPU) so your container knows which silicon it got.

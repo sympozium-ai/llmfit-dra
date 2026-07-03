@@ -1,0 +1,49 @@
+# Request a GPU AND an NPU in one claim, forced onto the same PCIe root.
+#
+# Two device requests in one claim, plus a constraint that both must share
+# the standardized cross-driver attribute resource.kubernetes.io/pcieRoot —
+# so they land on physically co-located silicon (on Strix Halo the on-die
+# GPU and NPU share a root). Both allocate and the kubelet plugin merges
+# their CDI edits into the ONE consumer pod. With multiple devices the bare
+# LLMFIT_DEVICE (last-wins) is ambiguous, so each device also gets a stable
+# per-device key LLMFIT_DEVICE_<NAME> whose value is its injected node path.
+#
+# Requires both a gpu0 and an npu0 on the same node — see 02 and 04 to
+# confirm your inventory first.
+#
+#   kubectl apply -f 05-gpu-plus-npu-aligned.yaml
+#   kubectl wait --for=condition=Ready pod/llmfit-aligned-demo --timeout=120s
+#   kubectl logs llmfit-aligned-demo    # LLMFIT_DEVICE_GPU0=/dev/dri/renderD128, LLMFIT_DEVICE_NPU0=/dev/…
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-npu-aligned-claim
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.llmfit.ai
+      - name: npu
+        exactly:
+          deviceClassName: npu.llmfit.ai
+    constraints:
+      - requests: ["gpu", "npu"]
+        matchAttribute: resource.kubernetes.io/pcieRoot
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-aligned-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo '--- llmfit env ---'; env | grep LLMFIT_ || echo '(none)'; sleep 3600"]
+      resources:
+        claims:
+          - name: accel
+  resourceClaims:
+    - name: accel
+      resourceClaimName: gpu-npu-aligned-claim

@@ -1,0 +1,41 @@
+# Request an NPU device.
+#
+# The `npu.llmfit.ai` DeviceClass matches devices the driver classified as
+# kind == "npu" (e.g. AMD XDNA on Strix Halo, Ascend). This only allocates
+# if the driver's probe actually surfaced an npu0 on the node — many nodes
+# have none. Confirm first:
+#
+#   kubectl get resourceslices -o yaml | grep -A2 'name: npu'
+#
+# If there's no npu0, the pod stays Pending — expected.
+#
+#   kubectl apply -f 04-npu-claim.yaml
+#   kubectl wait --for=condition=Ready pod/llmfit-npu-demo --timeout=120s
+#   kubectl logs llmfit-npu-demo        # LLMFIT_DEVICE=npu0
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: npu-claim
+spec:
+  devices:
+    requests:
+      - name: dev
+        exactly:
+          deviceClassName: npu.llmfit.ai
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-npu-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo '--- llmfit env ---'; env | grep LLMFIT_ || echo '(none)'; sleep 3600"]
+      resources:
+        claims:
+          - name: dev
+  resourceClaims:
+    - name: dev
+      resourceClaimName: npu-claim

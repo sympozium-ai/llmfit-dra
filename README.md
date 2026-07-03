@@ -88,6 +88,10 @@ The pod lands on a fitting device with its `/dev` nodes injected and
 `LLMFIT_DEVICE*` env set. No llmfit component is in the serving path — every
 artifact above is a plain Kubernetes object.
 
+New to this? [`examples/`](examples/) has copy-paste, self-verifying claims
+for each device kind (start with CPU and GPU — most nodes have both), plus
+the request-by-attribute and aligned multi-device patterns.
+
 ## What gets published
 
 One ResourceSlice per node. Devices are named by PCI address
