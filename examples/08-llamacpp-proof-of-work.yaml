@@ -1,0 +1,121 @@
+# PROOF OF WORK: place a real model on real silicon and generate tokens.
+#
+# Everything before this file proves *placement*; this one proves the
+# placed silicon actually serves a model. The chain:
+#
+#   ModelClaim (Qwen2.5-1.5B @ ≥30 tok/s)
+#     ─► controller resolves physics ─► scheduler picks a fitting GPU
+#     ─► kubelet plugin CDI-injects the render node (/dev/dri/renderD*)
+#     ─► llama.cpp's VULKAN build enumerates exactly that injected device
+#     ─► model downloads from HF, loads with full GPU offload (-ngl 99)
+#     ─► the qwen-pow Job asks it a question and prints the completion
+#
+#   kubectl apply -f 08-llamacpp-proof-of-work.yaml
+#   kubectl get modelclaim qwen-serving          # RESOLVED / SATISFIABLE
+#   kubectl logs deploy/qwen-serving | grep -i vulkan   # the silicon llama.cpp found
+#   kubectl logs job/qwen-pow -f                 # ...generated tokens = proof
+#   kubectl delete -f 08-llamacpp-proof-of-work.yaml
+#
+# The proof Job is single-shot by design: it waits (heartbeating) until the
+# server is ready, asks once, prints, exits Complete. To re-prove against a
+# running server: kubectl delete job qwen-pow && kubectl apply -f <this file>
+# (Job pod templates are immutable — re-apply alone won't re-fire it.)
+#
+# Expects a fit-capable GPU node (the ModelClaim refuses CPU fallback by
+# class). First run downloads ~1 GB of weights — the readiness probe is
+# budgeted for it, and the logs LOOK silent during the download (progress
+# is drawn with carriage returns kubectl never flushes; check
+# /root/.cache/huggingface growth if unsure).
+#
+# Measured on an AMD Strix Halo (Radeon 8060S, 256 GB/s, RADV):
+#   claim floor ≥30 tok/s → physics predicted ~140 → measured 171.9 tok/s
+#   (est/measured 0.81 — inside llmfit's calibration band).
+#
+# This is the same shape as an orchestrator's "Model" concept (e.g.
+# Sympozium's), built from nothing but stock primitives.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-serving
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  minTps: 30
+  deviceClassName: gpu.llmfit.ai       # serving pool: never the CPU fallback
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-serving
+  labels: { app: qwen-serving }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: qwen-serving }
+  template:
+    metadata:
+      labels: { app: qwen-serving }
+    spec:
+      containers:
+        - name: llama-server
+          # Vulkan build: uses whatever /dev/dri render node is present in
+          # the container — which is precisely the one the claim injected.
+          image: ghcr.io/ggml-org/llama.cpp:server-vulkan
+          args:
+            - -hf
+            - Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M
+            - --port
+            - "8080"
+            - -ngl
+            - "99"                     # offload every layer to the claimed GPU
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 60       # first run downloads ~1 GB of weights
+          resources:
+            claims: [{ name: model }]
+      resourceClaims:
+        - name: model
+          resourceClaimTemplateName: qwen-serving   # == the ModelClaim's name
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-serving
+spec:
+  selector: { app: qwen-serving }
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# The proof: wait for the server, ask for tokens, print them.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen-pow
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: prove
+          image: docker.io/curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - |
+              echo "waiting for qwen-serving to become ready (model download on first run)…"
+              i=0
+              until curl -sf http://qwen-serving:8080/health >/dev/null; do
+                i=$((i+1)); [ $((i % 6)) -eq 0 ] && echo "  still waiting (${i}0s) — weights downloading/loading; this is normal"
+                sleep 10
+              done
+              echo "--- asking the placed model for proof of work ---"
+              curl -sf http://qwen-serving:8080/v1/chat/completions \
+                -H 'Content-Type: application/json' \
+                -d '{"messages":[{"role":"user","content":"In one sentence: what just proved that Kubernetes placed you on a GPU that fits you?"}],"max_tokens":80}'
+              echo
+              echo "--- tokens generated on claim-allocated silicon. QED ---"
