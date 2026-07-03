@@ -1,0 +1,39 @@
+# Request the CPU device on whatever node the scheduler picks.
+#
+# The `cpu.llmfit.ai` DeviceClass IS the selector — no CEL needed. A cpu
+# claim prepares env-only (LLMFIT_DEVICE=cpu0), injects no device nodes, and
+# runs on any node, accelerator or not. This is the example that works on
+# every cluster, including GPU-less CI.
+#
+#   kubectl apply -f 01-cpu-claim.yaml
+#   kubectl wait --for=condition=Ready pod/llmfit-cpu-demo --timeout=120s
+#   kubectl logs llmfit-cpu-demo        # see the injected LLMFIT_DEVICE
+#   kubectl delete -f 01-cpu-claim.yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: cpu-claim
+spec:
+  devices:
+    requests:
+      - name: dev
+        exactly:
+          deviceClassName: cpu.llmfit.ai
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-cpu-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      # Print the CDI-injected device env, then idle so you can inspect it.
+      command: ["sh", "-c", "echo '--- llmfit env ---'; env | grep LLMFIT_ || echo '(none)'; sleep 3600"]
+      resources:
+        claims:
+          - name: dev
+  resourceClaims:
+    - name: dev
+      resourceClaimName: cpu-claim
