@@ -370,7 +370,13 @@ survivor_uid=$(kubectl get resourceclaim llmfit-survivor-claim -o jsonpath='{.me
 snode=$(kubectl get pod llmfit-survivor -o jsonpath='{.spec.nodeName}')
 
 kubectl -n "$NS" rollout restart daemonset/llmfit-dra >/dev/null
-kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=120s >/dev/null || fail "driver did not come back after restart"
+# A DaemonSet rollout is sequential (maxUnavailable=1): each node's pod must
+# terminate, then start two containers (driver + llmfit sidecar) and pass
+# readiness (~40-50s each). On a 3-node cluster that is ~130s — more than the
+# initial parallel install (180s in CI), so this restart needs a wider window.
+# 120s made this scenario flaky (passed v0.2.3, timed out v0.2.4 on identical
+# code with the 3rd pod only 9s into startup).
+kubectl -n "$NS" rollout status daemonset/llmfit-dra --timeout=300s >/dev/null || fail "driver did not come back after restart"
 
 phase=$(kubectl get pod llmfit-survivor -o jsonpath='{.status.phase}')
 [ "$phase" = "Running" ] || fail "survivor pod is '$phase' after driver restart, want Running"
