@@ -22,13 +22,30 @@ the node/device whose physics satisfy it ──► kubelet plugin injects
 
 ## Getting started
 
-Requires Kubernetes ≥ 1.34 (DRA GA). The image is on GHCR (currently
-private — create a pull secret with a `read:packages` token; `make
-pull-secret` does this).
+Requires Kubernetes ≥ 1.34 (DRA GA). The image **and** the Helm chart are
+published to GHCR (currently private — you need a `read:packages` token).
+
+Install the published chart straight from the registry (no checkout needed):
+
+```sh
+# 1. Log Helm in to the private registry (read:packages token)
+echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$USER" --password-stdin
+
+# 2. Install the chart — see Releases for the latest version
+helm install llmfit-dra oci://ghcr.io/sympozium-ai/charts/llmfit-dra \
+  --version 0.2.4 -n llmfit-dra --create-namespace
+
+kubectl get resourceslices        # your accelerator inventory, as API objects
+```
+
+The driver image is private too, so the pods need an image pull secret —
+`make pull-secret` creates one from a `read:packages` token (via
+`GITHUB_TOKEN` or `gh auth token`).
+
+Working from a checkout instead? Install the chart from the local path:
 
 ```sh
 helm install llmfit-dra charts/llmfit-dra -n llmfit-dra --create-namespace
-kubectl get resourceslices        # your accelerator inventory, as API objects
 ```
 
 Ask for a model instead of a device. The generator resolves weights size and
