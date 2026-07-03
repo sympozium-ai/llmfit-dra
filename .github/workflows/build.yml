@@ -105,6 +105,23 @@ jobs:
           helm package charts/llmfit-dra -d /tmp/chart
           helm push /tmp/chart/llmfit-dra-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
 
+
+  # Releases are created as DRAFTS by release-please so the Releases page
+  # never advertises a version whose image/chart don't exist yet (a fresh
+  # `helm install` of a just-cut version raced the ~8 min build window).
+  # Publish only once both artifacts are pushed.
+  publish-release:
+    needs: [image, chart]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
   image:
     needs: test
     runs-on: ubuntu-latest
