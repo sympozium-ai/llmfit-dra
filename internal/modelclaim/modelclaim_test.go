@@ -125,6 +125,7 @@ func slice(node string, devices ...resourceapi.Device) *resourceapi.ResourceSlic
 		ObjectMeta: metav1.ObjectMeta{Name: node + "-slice"},
 		Spec: resourceapi.ResourceSliceSpec{
 			Driver:   DriverDomain,
+			Pool:     resourceapi.ResourcePool{Name: node},
 			NodeName: ptr.To(node),
 			Devices:  devices,
 		},
@@ -136,7 +137,7 @@ func TestEvaluateSlicesSatisfied(t *testing.T) {
 		slice("node-a", device("gpu0", "gpu", 24, 936, true, false), device("cpu0", "cpu", 64, 0, true, false)),
 		slice("node-b", device("gpu0", "gpu", 24, 936, true, false)),
 	}
-	c := EvaluateSlices(slices, testBounds(), "llmfit.ai")
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai")
 	if c.Devices != 2 || c.Nodes != 2 {
 		t.Fatalf("want 2 devices on 2 nodes, got %+v", c)
 	}
@@ -149,7 +150,7 @@ func TestEvaluateSlicesShortfall(t *testing.T) {
 	slices := []*resourceapi.ResourceSlice{
 		slice("strix", device("gpu0", "gpu", 96, 256, true, false)),
 	}
-	c := EvaluateSlices(slices, b, "llmfit.ai")
+	c := EvaluateSlices(slices, nil, b, "llmfit.ai")
 	if c.Devices != 0 {
 		t.Fatalf("want no candidates, got %+v", c)
 	}
@@ -165,7 +166,7 @@ func TestEvaluateSlicesCPUOnlyNoBandwidth(t *testing.T) {
 	slices := []*resourceapi.ResourceSlice{
 		slice("kind-node", device("cpu0", "cpu", 64, 0, true, false)),
 	}
-	c := EvaluateSlices(slices, testBounds(), "llmfit.ai")
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai")
 	if c.Devices != 0 {
 		t.Fatalf("want no candidates, got %+v", c)
 	}
@@ -182,12 +183,60 @@ func TestEvaluateSlicesExclusions(t *testing.T) {
 			device("npu0", "npu", 24, 936, true, false),  // wrong kind for gpu class
 		),
 	}
-	if c := EvaluateSlices(slices, testBounds(), "gpu.llmfit.ai"); c.Devices != 0 {
+	if c := EvaluateSlices(slices, nil, testBounds(), "gpu.llmfit.ai"); c.Devices != 0 {
 		t.Fatalf("want 0 candidates for gpu class, got %+v", c)
 	}
 	// The npu class does match npu0.
-	if c := EvaluateSlices(slices, testBounds(), "npu.llmfit.ai"); c.Devices != 1 {
+	if c := EvaluateSlices(slices, nil, testBounds(), "npu.llmfit.ai"); c.Devices != 1 {
 		t.Fatalf("want npu candidate, got %+v", c)
+	}
+}
+
+// Allocation-aware availability (issue #21): physics-satisfiable devices
+// held by allocated claims are counted but not available.
+func TestEvaluateSlicesSubtractsAllocated(t *testing.T) {
+	slices := []*resourceapi.ResourceSlice{
+		slice("node-a", device("gpu0", "gpu", 24, 936, true, false)),
+		slice("node-b", device("gpu0", "gpu", 24, 936, true, false)),
+	}
+	// node-a's gpu0 is held; slice() names pools after the node.
+	setPool := func(s *resourceapi.ResourceSlice, pool string) *resourceapi.ResourceSlice {
+		s.Spec.Pool.Name = pool
+		return s
+	}
+	setPool(slices[0], "node-a")
+	setPool(slices[1], "node-b")
+	allocated := map[string]string{"node-a/gpu0": "default/other-claim"}
+
+	c := EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai")
+	if c.Devices != 2 || c.Available != 1 {
+		t.Fatalf("want 2 devices / 1 available, got %+v", c)
+	}
+
+	allocated["node-b/gpu0"] = "team-a/another"
+	c = EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai")
+	if c.Devices != 2 || c.Available != 0 || c.HeldBy == "" {
+		t.Fatalf("want 2 devices / 0 available with a named holder, got %+v", c)
+	}
+}
+
+func TestAllocatedDevices(t *testing.T) {
+	rc := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: DriverDomain, Pool: "node-a", Device: "gpu0"},
+						{Driver: "other.vendor", Pool: "node-a", Device: "gpuX"},
+					},
+				},
+			},
+		},
+	}
+	held := AllocatedDevices([]*resourceapi.ResourceClaim{rc, {}})
+	if len(held) != 1 || held["node-a/gpu0"] != "default/demo" {
+		t.Fatalf("want only our driver's device held, got %v", held)
 	}
 }
 

@@ -40,6 +40,7 @@ type Controller struct {
 
 	mcInformer    cache.SharedIndexInformer
 	sliceInformer cache.SharedIndexInformer
+	claimInformer cache.SharedIndexInformer
 }
 
 func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) *Controller {
@@ -69,6 +70,15 @@ func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) 
 		DeleteFunc: func(any) { c.enqueueAll() },
 	})
 
+	// ResourceClaim allocations move devices between held and available, so
+	// they refresh Satisfiable's availability numbers too (issue #21).
+	c.claimInformer = factory.Resource().V1().ResourceClaims().Informer()
+	c.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { c.enqueueAll() },
+		UpdateFunc: func(_, obj any) { c.enqueueAll() },
+		DeleteFunc: func(any) { c.enqueueAll() },
+	})
+
 	return c
 }
 
@@ -90,7 +100,8 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 
 	go c.mcInformer.Run(ctx.Done())
 	go c.sliceInformer.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), c.mcInformer.HasSynced, c.sliceInformer.HasSynced) {
+	go c.claimInformer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), c.mcInformer.HasSynced, c.sliceInformer.HasSynced, c.claimInformer.HasSynced) {
 		return fmt.Errorf("informer caches did not sync")
 	}
 	klog.FromContext(ctx).Info("modelclaim controller started")
@@ -210,16 +221,26 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		}
 		status["templateRef"] = map[string]any{"name": name}
 		status["candidates"] = map[string]any{
-			"devices": int64(cands.Devices),
-			"nodes":   int64(cands.Nodes),
+			"devices":   int64(cands.Devices),
+			"nodes":     int64(cands.Nodes),
+			"available": int64(cands.Available),
 		}
 		setCondition(status, mc.GetGeneration(), condResolved, "True", "Resolved",
 			fmt.Sprintf("%s @ %s: memory>=%dGi, bandwidth>=%dGB/s",
 				bounds.Model, bounds.Quant, bounds.MemoryGi, bounds.MinBandwidthGBs))
-		if cands.Devices > 0 {
+		switch {
+		case cands.Devices > 0 && cands.Available > 0:
 			setCondition(status, mc.GetGeneration(), condSatisfiable, "True", "DevicesAvailable",
-				fmt.Sprintf("%d device(s) on %d node(s) satisfy the bounds", cands.Devices, cands.Nodes))
-		} else {
+				fmt.Sprintf("%d device(s) on %d node(s) satisfy the bounds (%d currently unallocated)",
+					cands.Devices, cands.Nodes, cands.Available))
+		case cands.Devices > 0:
+			// Physics fits but every matching device is held by another
+			// claim: satisfiable in principle, queued in practice — say so
+			// (issue #21; this exact ambiguity misled a live operator).
+			setCondition(status, mc.GetGeneration(), condSatisfiable, "True", "AllDevicesHeld",
+				fmt.Sprintf("%d device(s) satisfy the bounds but 0 are unallocated (e.g. held by %s) — pods will queue until a claim releases",
+					cands.Devices, cands.HeldBy))
+		default:
 			setCondition(status, mc.GetGeneration(), condSatisfiable, "False", "NoCandidates", cands.Shortfall)
 		}
 	})
@@ -232,7 +253,13 @@ func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string) Candidate
 			slices = append(slices, s)
 		}
 	}
-	return EvaluateSlices(slices, b, deviceClass)
+	var claims []*resourceapi.ResourceClaim
+	for _, obj := range c.claimInformer.GetStore().List() {
+		if rc, ok := obj.(*resourceapi.ResourceClaim); ok {
+			claims = append(claims, rc)
+		}
+	}
+	return EvaluateSlices(slices, AllocatedDevices(claims), b, deviceClass)
 }
 
 // updateStatus mutates .status via the status subresource with a fresh GET
