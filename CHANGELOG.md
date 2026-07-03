@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.4](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.3...v0.2.4) (2026-07-03)
+
+
+### Bug Fixes
+
+* **ci:** chart publish — docker login before manifest inspect ([34115f1](https://github.com/sympozium-ai/llmfit-dra/commit/34115f1e84eddbff099e6b4c37b34c3613aeea0f))
+* **ci:** docker login before manifest inspect in the chart job ([86a76f7](https://github.com/sympozium-ai/llmfit-dra/commit/86a76f75ab6433b084833de5b67bc16d185ff38d))
+
 ## [0.2.3](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.2...v0.2.3) (2026-07-03)
 
 
