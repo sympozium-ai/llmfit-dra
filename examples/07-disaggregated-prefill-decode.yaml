@@ -1,0 +1,106 @@
+# Disaggregated prefill/decode — what a real serving fleet looks like when
+# each ROLE claims hardware by its own physics.
+#
+# Modern serving stacks (vLLM disaggregated prefill, NVIDIA Dynamo,
+# Mooncake) split inference into two pools with OPPOSITE hardware appetites:
+#
+#   prefill  — compute-bound; wants memory headroom for long-context KV
+#              while it chews through the prompt. Latency per request,
+#              throughput per device.
+#   decode   — memory-bandwidth-bound; tok/s ≈ bandwidth / weights. This is
+#              EXACTLY the physics ModelClaim's minTps encodes.
+#
+# Same model, two ModelClaims, two Deployments. The decode claim carries a
+# high tok/s floor (bandwidth selects the device); the prefill claim keeps
+# minTps modest and instead demands memory headroom via extraSelectors.
+# The scheduler sorts your heterogeneous fleet into the right pools with
+# zero node labels, taints, or affinity gymnastics.
+#
+#   kubectl apply -f 07-disaggregated-prefill-decode.yaml
+#   kubectl get modelclaim qwen-prefill qwen-decode   # per-role physics
+#   kubectl get pods -l app=qwen-pd -o wide            # who landed where
+#
+# Honesty notes:
+# - Devices are exclusive: one claim holds one device. On a single-GPU box
+#   expect one role Pending — that's correct; this example is the shape of
+#   a MULTI-node fleet. `kubectl describe modelclaim` explains any shortfall.
+# - The KV-cache transfer path between pools (NIXL/UCX, vLLM
+#   --kv-transfer-config, Dynamo) belongs to the serving layer you deploy
+#   in these containers. llmfit-dra's job ends at putting each role on
+#   silicon that can do that role — it is never in the serving path.
+---
+# Decode pool: bandwidth is the whole game. minTps 25 on a ~1.8 GB Q4 model
+# resolves to a ~82 GB/s floor — a discrete GPU or a fast unified-memory APU
+# qualifies; a lesser iGPU or the CPU fallback does not.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-decode
+spec:
+  model: Qwen/Qwen2.5-Coder-3B-Instruct
+  minTps: 25
+  deviceClassName: gpu.llmfit.ai       # decode never falls back to CPU
+---
+# Prefill pool: modest tok/s floor (prefill isn't decode-bound), but demand
+# memory headroom for long-context KV on top of the resolved weights floor.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-prefill
+spec:
+  model: Qwen/Qwen2.5-Coder-3B-Instruct
+  minTps: 5
+  extraSelectors:
+    # Long-context prefill: the device must hold weights + a deep KV cache.
+    - >-
+      device.capacity['llmfit.ai'].memory.compareTo(quantity('12Gi')) >= 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-decode
+  labels: { app: qwen-pd, role: decode }
+spec:
+  replicas: 2                          # one device per replica (claims are
+  selector:                            # stamped per pod from the template)
+    matchLabels: { app: qwen-pd, role: decode }
+  template:
+    metadata:
+      labels: { app: qwen-pd, role: decode }
+    spec:
+      containers:
+        - name: decode
+          # Real deployments: your inference server (e.g. vLLM with
+          # disaggregated-decode config) goes here.
+          image: docker.io/library/busybox:1.36
+          command: ["sh", "-c", "echo role=decode; env | grep LLMFIT_; sleep 3600"]
+          resources:
+            claims: [{ name: model }]
+      resourceClaims:
+        - name: model
+          resourceClaimTemplateName: qwen-decode
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-prefill
+  labels: { app: qwen-pd, role: prefill }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: qwen-pd, role: prefill }
+  template:
+    metadata:
+      labels: { app: qwen-pd, role: prefill }
+    spec:
+      containers:
+        - name: prefill
+          # Real deployments: prefill-role inference server + KV egress
+          # (NIXL/UCX) goes here.
+          image: docker.io/library/busybox:1.36
+          command: ["sh", "-c", "echo role=prefill; env | grep LLMFIT_; sleep 3600"]
+          resources:
+            claims: [{ name: model }]
+      resourceClaims:
+        - name: model
+          resourceClaimTemplateName: qwen-prefill
