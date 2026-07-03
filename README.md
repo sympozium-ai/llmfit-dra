@@ -3,6 +3,32 @@
 **Run LLMs on the right accelerator using nothing but the Kubernetes
 scheduler.**
 
+```yaml
+# "Run Qwen3.6 at ≥20 tok/s" — as a Kubernetes object.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata: { name: qwen36 }
+spec:
+  model: Qwen/Qwen3.6-30B-A3B
+  minTps: 20
+```
+
+```console
+$ kubectl get modelclaim qwen36
+NAME     MODEL                  MINTPS   RESOLVED   SATISFIABLE   DEVICES
+qwen36   Qwen/Qwen3.6-30B-A3B   20       True       True          2
+```
+
+That's the value proposition in one object: you name the **model**, the
+driver resolves the physics (weights size, bandwidth floor for your
+tok/s target) from llmfit's database, and the stock kube-scheduler
+places your pod on silicon that can actually run it. **No other DRA
+driver can take this request** — they allocate by spec sheet (memory
+quantities, product names); llmfit-dra allocates by what the hardware
+can *do*. And when nothing fits, `kubectl describe modelclaim` says
+exactly why (`closest device gpu-…: bandwidth 256 < 640 GB/s`) — before
+any pod exists.
+
 Kubernetes can allocate GPUs, but it has no idea whether a model *fits* one:
 whether the weights fit in device memory, or whether the memory bandwidth
 can hit your tokens-per-second target. That knowledge lives in
@@ -15,9 +41,12 @@ wires the allocated device into your pod via CDI. The stock kube-scheduler
 does the placement; no custom scheduler, no annotations, no webhooks.
 
 ```
-llmfit claim <model> ──► ResourceClaim (fit as CEL) ──► kube-scheduler picks
-the node/device whose physics satisfy it ──► kubelet plugin injects
-/dev nodes + env ──► your pod runs on silicon that can actually hold the model
+ModelClaim "run Qwen3.6 at ≥20 tok/s"
+   ──► controller resolves weights + bandwidth floor from llmfit's model DB
+   ──► same-named ResourceClaimTemplate (the physics, inlined as CEL)
+   ──► kube-scheduler picks the node/device that satisfies it
+   ──► kubelet plugin injects /dev nodes + env
+   ──► your pod runs on silicon that can actually hold the model
 ```
 
 ## Getting started

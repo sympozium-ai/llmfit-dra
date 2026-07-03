@@ -3,7 +3,7 @@
 # bandwidth floor from llmfit's database and maintains a same-named
 # ResourceClaimTemplate with the physics inlined as CEL.
 #
-#   kubectl apply -f 06-modelclaim.yaml
+#   kubectl apply -f 00-modelclaim.yaml
 #   kubectl get modelclaim qwen-coder        # RESOLVED / SATISFIABLE columns
 #   kubectl describe modelclaim qwen-coder   # bounds, candidates, or the
 #                                            # exact shortfall ("bandwidth
