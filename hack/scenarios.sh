@@ -281,12 +281,16 @@ fi
 # before flipping to api.
 driver_exec curl -sf --unix-socket /run/llmfit/llmfit.sock http://localhost/health >/dev/null \
   || fail "llmfit sidecar socket not serving /health"
+# The flip to api can take up to two probe cycles (default interval 60s):
+# cycle 1 execs while the sidecar warms up, cycle 2 retries the socket. A
+# 60s window raced that on fresh deploys (and `kubectl logs ds/` can pick
+# the terminating pod mid-rollout), so wait out two full cycles + margin.
 api_ok=""
-for i in $(seq 1 20); do
-  if kubectl -n "$NS" logs ds/llmfit-dra -c llmfit-dra | grep -q 'llmfit capability transport" transport="api"'; then api_ok=1; break; fi
+for i in $(seq 1 60); do
+  if kubectl -n "$NS" logs ds/llmfit-dra -c llmfit-dra 2>/dev/null | grep -q 'llmfit capability transport" transport="api"'; then api_ok=1; break; fi
   sleep 3
 done
-[ -n "$api_ok" ] || fail "driver did not use the API transport within 60s (exec fallback or index in use?)"
+[ -n "$api_ok" ] || fail "driver did not use the API transport within 180s (exec fallback or index in use?)"
 pass "capability flows over the AF_UNIX serve API (sidecar healthy)"
 
 echo "== Scenario 5b: metrics + health endpoints"
