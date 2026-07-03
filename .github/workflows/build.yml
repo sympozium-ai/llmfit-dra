@@ -92,6 +92,11 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          # docker needs its own login: helm registry login writes helm's
+          # auth config, not ~/.docker/config.json, and the package is
+          # private — an unauthenticated manifest inspect reports "not
+          # found" even when the image exists.
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           # The chart's appVersion (== image tag) must be a real manifest.
           if ! docker manifest inspect "ghcr.io/${{ github.repository }}:${version}" >/dev/null 2>&1; then
             echo "::error::image ghcr.io/${{ github.repository }}:${version} not found — refusing to publish chart" >&2
