@@ -48,40 +48,48 @@ Working from a checkout instead? Install the chart from the local path:
 helm install llmfit-dra charts/llmfit-dra -n llmfit-dra --create-namespace
 ```
 
-Ask for a model instead of a device. The generator resolves weights size and
-bandwidth floor from llmfit's model database and emits plain YAML (the
-binary ships in the driver image):
-
-```sh
-kubectl -n llmfit-dra exec ds/llmfit-dra -- \
-  llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -
-```
+Ask for a **model** instead of a device — the request no other DRA driver
+can take. A `ModelClaim` resolves the model's weights size and bandwidth
+floor from llmfit's database and maintains a same-named
+`ResourceClaimTemplate` with the physics inlined as CEL:
 
 ```yaml
-# fit: tok/s ≈ bandwidth × 55% / 4.4 GB ⇒ bandwidth ≥ 161 GB/s for ≥ 20 tok/s
-kind: ResourceClaim
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata: { name: qwen36 }
 spec:
-  devices:
-    requests:
-      - name: model
-        exactly:
-          deviceClassName: llmfit.ai
-          selectors:
-            - cel: { expression: "... memory ≥ 5Gi && bandwidth ≥ 161 && healthy ..." }
+  model: Qwen/Qwen3.6-30B-A3B
+  minTps: 20
 ```
 
-Reference it from any pod (`--template` emits a ResourceClaimTemplate for
-Deployments):
+```sh
+kubectl get modelclaim qwen36
+# NAME     MODEL                  MINTPS  RESOLVED  SATISFIABLE  DEVICES
+# qwen36   Qwen/Qwen3.6-30B-A3B   20      True      True         2
+```
+
+`kubectl describe` shows the resolved bounds (`memory>=18Gi,
+bandwidth>=160GB/s @ Q4_K_M`) and — when nothing fits — the exact
+shortfall (`closest device gpu-…: bandwidth 256 < 640 GB/s`), *before any
+pod exists*. Reference it from any pod by the same name:
 
 ```yaml
 spec:
   resourceClaims:
     - name: model
-      resourceClaimName: qwen-qwen2-5-7b-fit
+      resourceClaimTemplateName: qwen36   # == the ModelClaim's name
   containers:
     - name: main
       resources:
         claims: [{ name: model }]
+```
+
+Prefer no controller? The imperative twin emits the same physics as plain
+YAML (the binary ships in the driver image):
+
+```sh
+kubectl -n llmfit-dra exec ds/llmfit-dra -- \
+  llmfit claim Qwen/Qwen2.5-7B --min-tps 20 | kubectl apply -f -
 ```
 
 The pod lands on a fitting device with its `/dev` nodes injected and

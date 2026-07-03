@@ -27,6 +27,7 @@ class and any CEL you add.
 | [`03-gpu-with-min-memory.yaml`](03-gpu-with-min-memory.yaml) | a GPU with ≥ 16Gi memory (class + CEL) | nodes with a big-enough GPU |
 | [`04-npu-claim.yaml`](04-npu-claim.yaml) | the NPU device, by class alone | nodes with an NPU |
 | [`05-gpu-plus-npu-aligned.yaml`](05-gpu-plus-npu-aligned.yaml) | a GPU **and** NPU on the same PCIe root | nodes with both |
+| [`06-modelclaim.yaml`](06-modelclaim.yaml) | **a device that can run a model** (ModelClaim) | any — status explains fit |
 
 Most nodes have at least a CPU and a GPU, so **01 and 02 are the ones to
 start with**:
@@ -42,12 +43,27 @@ If a device isn't present the pod stays **Pending** ("cannot allocate all
 claims") — that's the honest signal that the node can't satisfy the request,
 not an error.
 
-## Bonus: ask for a model, not a device
+## Ask for a model, not a device (ModelClaim)
 
-Instead of naming a device, name the **model** and let the physics pick.
-The generator (shipped in the driver image) resolves the model's weight
-size and bandwidth floor from llmfit's database and writes the fit CEL for
-you:
+Instead of naming a device, name the **model** — the capability no other
+DRA driver has. Declaratively, with `06-modelclaim.yaml`:
+
+```yaml
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata: { name: qwen-coder }
+spec: { model: Qwen/Qwen2.5-Coder-3B-Instruct, minTps: 15 }
+```
+
+The controller resolves the physics and maintains a **same-named
+ResourceClaimTemplate**; your pod just says
+`resourceClaimTemplateName: qwen-coder`. `kubectl describe modelclaim`
+shows the resolved bounds and whether any device in the cluster satisfies
+them — including the exact shortfall when none does.
+
+The imperative equivalent (no controller needed) is the generator shipped
+in the driver image; it resolves the same bounds and writes the fit CEL
+for you:
 
 ```sh
 kubectl -n llmfit-dra exec ds/llmfit-dra -- \

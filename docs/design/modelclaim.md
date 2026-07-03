@@ -1,6 +1,6 @@
 # ModelClaim: "run Qwen3.6" as a Kubernetes object
 
-**Status:** Proposed · **Author:** Alex Jones · **Date:** 2026-07-03
+**Status:** Accepted — M1 implemented · **Author:** Alex Jones · **Date:** 2026-07-03
 **Decision sought:** approve the `ModelClaim` v1alpha1 API + controller (Phase M1)
 
 ## Motivation

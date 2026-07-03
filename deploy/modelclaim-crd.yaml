@@ -1,0 +1,128 @@
+# ModelClaim: "run <model>" as a Kubernetes object (docs/design/modelclaim.md).
+#
+# The controller resolves spec.model against llmfit's database and reconciles
+# a SAME-NAMED ResourceClaimTemplate; pods reference it with plain
+# `resourceClaimTemplateName: <name>`. Structural validation lives here
+# (schema + CEL rules) — no admission webhooks. Semantic errors (model not
+# in the database) surface asynchronously as the Resolved condition.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelclaims.llmfit.ai
+spec:
+  group: llmfit.ai
+  scope: Namespaced
+  names:
+    kind: ModelClaim
+    listKind: ModelClaimList
+    plural: modelclaims
+    singular: modelclaim
+    shortNames: [mclaim]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Model
+          type: string
+          jsonPath: .spec.model
+        - name: MinTPS
+          type: number
+          jsonPath: .spec.minTps
+        - name: Resolved
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Resolved")].status
+        - name: Satisfiable
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Satisfiable")].status
+        - name: Devices
+          type: integer
+          jsonPath: .status.candidates.devices
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [model]
+              x-kubernetes-validations:
+                - rule: "!has(self.minTps) || self.minTps > 0.0"
+                  message: "minTps must be > 0"
+                - rule: "!has(self.efficiencyPct) || (self.efficiencyPct >= 1 && self.efficiencyPct <= 100)"
+                  message: "efficiencyPct must be in 1..100"
+              properties:
+                model:
+                  description: >-
+                    Catalog name or HuggingFace repo id, resolved against the
+                    llmfit model database (embedded catalog + update cache +
+                    custom_models.json overlay).
+                  type: string
+                  minLength: 1
+                minTps:
+                  description: >-
+                    Target decode throughput. Sets the bandwidth floor via
+                    tok/s ≈ bandwidth × efficiency / weights.
+                  type: number
+                  default: 20
+                quant:
+                  description: Quantization override (default = catalog quant).
+                  type: string
+                efficiencyPct:
+                  description: Bandwidth efficiency assumption (percent).
+                  type: integer
+                  default: 55
+                deviceClassName:
+                  description: >-
+                    DeviceClass the emitted request targets. gpu.llmfit.ai
+                    refuses the CPU fallback; llmfit.ai allows any kind.
+                  type: string
+                  default: llmfit.ai
+                extraSelectors:
+                  description: >-
+                    Extra CEL expressions ANDed onto the generated selector
+                    (DRA ANDs all selectors). Never replaces the physics.
+                  type: array
+                  items:
+                    type: string
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                resolved:
+                  type: object
+                  properties:
+                    memoryGi: { type: integer }
+                    minBandwidthGBs: { type: integer }
+                    quant: { type: string }
+                    weightsGb: { type: string }
+                    resolverVersion: { type: string }
+                templateRef:
+                  type: object
+                  properties:
+                    name: { type: string }
+                candidates:
+                  type: object
+                  properties:
+                    devices: { type: integer }
+                    nodes: { type: integer }
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: { type: string }
+                      status: { type: string }
+                      reason: { type: string }
+                      message: { type: string }
+                      observedGeneration: { type: integer }
+                      lastTransitionTime: { type: string, format: date-time }
