@@ -165,6 +165,31 @@ Everything is a Helm value: `image.*`, `metricsPort`, `probeInterval`, `kubeletP
 slice writes to its own node), tolerations/priority. See
 `charts/llmfit-dra/values.yaml`.
 
+### Running on a subset of nodes (NFD)
+
+By default the DaemonSet runs everywhere — the `cpu0` fallback is what makes
+accelerator-less nodes useful. If you want an accelerator-only deployment and
+the cluster already runs
+[node-feature-discovery](https://github.com/kubernetes-sigs/node-feature-discovery)
+(the NVIDIA GPU Operator ships it), pin the agent with a hardware-presence
+label:
+
+```yaml
+# values.yaml — pick the label your cluster actually has
+nodeSelector:
+  feature.node.kubernetes.io/pci-0300_1002.present: "true"  # NFD: AMD display-class device
+# nodeSelector:
+#   nvidia.com/gpu.present: "true"                          # GPU Operator equivalent
+```
+
+That's the extent of the integration — llmfit-dra never reads node labels
+itself. Capability (VRAM, bandwidth, health) is published as per-device
+ResourceSlice attributes because that's what DRA CEL can evaluate; node
+labels structurally can't participate in the fit. Vendor coexistence is
+likewise detected live — does a vendor driver publish slices for this
+node? — rather than inferred from hardware-presence labels
+(`vendorDrivers`).
+
 ## Development
 
 ```sh

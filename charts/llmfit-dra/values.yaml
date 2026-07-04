@@ -59,6 +59,11 @@ serviceAccount:
 priorityClassName: system-node-critical
 tolerations:
   - operator: Exists
+# Empty = run everywhere (the cpu0 fallback keeps accelerator-less nodes
+# useful). For an accelerator-only deployment, pin via a hardware-presence
+# label, e.g. NFD's feature.node.kubernetes.io/pci-0300_<vendor>.present
+# or the GPU Operator's nvidia.com/gpu.present — see README "Running on a
+# subset of nodes".
 nodeSelector: {}
 
 # Driver container. Memory request == limit so a node-critical pod under its
