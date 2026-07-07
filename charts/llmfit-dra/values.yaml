@@ -2,7 +2,11 @@ image:
   repository: ghcr.io/sympozium-ai/llmfit-dra
   # Defaults to .Chart.AppVersion when empty.
   tag: ""
-  pullPolicy: Always
+  # IfNotPresent on a release-pinned tag: the node-critical DaemonSet must be
+  # able to restart from the image cache during a registry outage (the rollout
+  # design in docs/ARCHITECTURE.md depends on this). Set Always only for
+  # mutable dev tags.
+  pullPolicy: IfNotPresent
 
 # Names of pre-created dockerconfigjson secrets in the release namespace
 # (the GHCR package is currently private — see `make pull-secret`).
@@ -27,6 +31,18 @@ llmfitSidecar:
 # the pod is hostNetwork — scrape at nodeIP:metricsPort).
 metricsPort: 9099
 
+# Metrics discovery. Annotations cover annotation-based scrapers; the
+# PodMonitor covers prometheus-operator/kube-prometheus-stack (a PodMonitor
+# fits a hostNetwork DaemonSet better than a Service+ServiceMonitor pair).
+metrics:
+  # prometheus.io/scrape annotations on both pod templates.
+  annotations: true
+  podMonitor:
+    enabled: false
+    # Extra labels for the PodMonitor (e.g. `release: kube-prometheus-stack`
+    # so the operator's selector picks it up).
+    labels: {}
+
 # Driver flags.
 probeInterval: 30s
 logVerbosity: 2
@@ -39,7 +55,7 @@ cdiDir: /var/run/cdi
 publishTaints: false
 # Vendor DRA drivers whose presence on a node demotes our GPUs to
 # fitness-only (empty string disables coexistence demotion).
-vendorDrivers: "gpu.nvidia.com,gpu.intel.com,neuron.amazonaws.com"
+vendorDrivers: "gpu.nvidia.com,gpu.amd.com,gpu.intel.com,neuron.amazonaws.com"
 
 # Ship the llmfit.ai DeviceClasses (base + per-kind). Disable only if you
 # manage classes out-of-band.

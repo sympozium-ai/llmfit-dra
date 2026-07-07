@@ -2,6 +2,7 @@ package publisher
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,7 +15,10 @@ import (
 // DeviceClasses exclude them) so the same silicon is never allocatable
 // through two drivers at once. Unrelated DRA drivers (NICs, FPGAs) must NOT
 // trigger the demotion — hence a known list, not "any other driver".
-const DefaultVendorDrivers = "gpu.nvidia.com,gpu.intel.com,neuron.amazonaws.com"
+// (gpu.amd.com is AMD's DRA driver: on an AMD-heavy fleet its absence here
+// was the most likely real double-booking, since amdgpu GPUs are otherwise
+// fully preparable through our default classes.)
+const DefaultVendorDrivers = "gpu.nvidia.com,gpu.amd.com,gpu.intel.com,neuron.amazonaws.com"
 
 // ParseVendorDrivers splits the --vendor-drivers flag; empty disables
 // coexistence demotion entirely.
@@ -29,23 +33,36 @@ func ParseVendorDrivers(flag string) map[string]bool {
 }
 
 // VendorGPUsPresent reports whether any known vendor GPU driver publishes
-// ResourceSlices for this node. One field-selected list per probe cycle —
-// the same selector the scheduler and kubelet use, so it stays O(this
-// node's slices) regardless of cluster size.
-func VendorGPUsPresent(ctx context.Context, client kubernetes.Interface, nodeName string, vendors map[string]bool) (bool, error) {
+// ResourceSlices for this node, plus the sorted set of OTHER foreign DRA
+// drivers seen (not ours, not in the known list) — callers surface those so
+// an unrecognized vendor driver is a visible gap in the coexistence list
+// instead of a silent double-booking. One field-selected list per probe
+// cycle — the same selector the scheduler and kubelet use, so it stays
+// O(this node's slices) regardless of cluster size.
+func VendorGPUsPresent(ctx context.Context, client kubernetes.Interface, nodeName string, vendors map[string]bool) (bool, []string, error) {
 	if len(vendors) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	slices, err := client.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + nodeName,
 	})
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
+	present := false
+	unknown := map[string]bool{}
 	for _, s := range slices.Items {
-		if vendors[s.Spec.Driver] {
-			return true, nil
+		switch {
+		case vendors[s.Spec.Driver]:
+			present = true
+		case s.Spec.Driver != DriverName:
+			unknown[s.Spec.Driver] = true
 		}
 	}
-	return false, nil
+	others := make([]string, 0, len(unknown))
+	for d := range unknown {
+		others = append(others, d)
+	}
+	sort.Strings(others)
+	return present, others, nil
 }

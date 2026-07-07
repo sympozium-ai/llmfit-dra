@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -49,7 +50,7 @@ func main() {
 	flag.Parse()
 
 	if *controller {
-		if err := runController(*kubeconfig, *llmfitBin); err != nil {
+		if err := runController(*kubeconfig, *llmfitBin, *metricsAddr); err != nil {
 			klog.ErrorS(err, "llmfit-dra modelclaim controller failed")
 			os.Exit(1)
 		}
@@ -66,7 +67,7 @@ func main() {
 // ResourceClaimTemplate reconciliation. Deliberately not part of the
 // DaemonSet run: it needs none of the host privileges (hostNetwork,
 // NET_ADMIN, /sys) the per-node agent holds.
-func runController(kubeconfig, llmfitBin string) error {
+func runController(kubeconfig, llmfitBin, metricsAddr string) error {
 	cfg, err := buildConfig(kubeconfig)
 	if err != nil {
 		return fmt.Errorf("building kube config: %w", err)
@@ -83,13 +84,31 @@ func runController(kubeconfig, llmfitBin string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Same observability contract as the node agent: /metrics + probes, and
+	// a listen failure takes the pod down. Readiness flips after cache sync;
+	// liveness rides worker beats plus an idle tick (see Controller.Run).
+	health := observe.NewHealth(2 * time.Minute)
+	go func() {
+		if err := health.Serve(ctx, metricsAddr); err != nil {
+			klog.ErrorS(err, "metrics/health server failed; exiting")
+			os.Exit(1)
+		}
+	}()
+
 	resolver := &modelclaim.ExecResolver{Bin: llmfitBin}
-	return modelclaim.New(dyn, client, resolver).Run(ctx, 2)
+	c := modelclaim.New(dyn, client, resolver)
+	c.Health = health
+	return c.Run(ctx, 2)
 }
 
 func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, interval time.Duration, nodePlugin bool, cdiDir string, taints bool, vendorFlag, metricsAddr string) error {
 	if nodeName == "" {
 		return fmt.Errorf("--node-name or NODE_NAME is required")
+	}
+	if interval < time.Second {
+		// time.NewTicker(0) panics, and NewHealth(3*interval) would make
+		// liveness unsatisfiable for tiny intervals.
+		return fmt.Errorf("--probe-interval must be at least 1s, got %s", interval)
 	}
 
 	cfg, err := buildConfig(kubeconfig)
@@ -134,14 +153,23 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 	vendorDrivers := publisher.ParseVendorDrivers(vendorFlag)
 	opts := publisher.Options{Taints: taints}
 	// refreshOpts re-evaluates per-cycle facts that live outside sysfs.
+	var prevForeign []string
 	refreshOpts := func() {
-		vm, err := publisher.VendorGPUsPresent(ctx, client, nodeName, vendorDrivers)
+		vm, foreign, err := publisher.VendorGPUsPresent(ctx, client, nodeName, vendorDrivers)
 		if err != nil {
+			observe.ProbeError("coexist")
 			klog.ErrorS(err, "vendor coexistence check failed; keeping previous state")
 			return
 		}
 		if vm != opts.VendorManagedGPUs {
 			klog.InfoS("vendor GPU driver presence changed; GPUs demoted to fitness-only", "vendorManaged", vm)
+		}
+		if !slices.Equal(foreign, prevForeign) {
+			// A DRA driver we don't recognize publishes for this node: if it
+			// owns GPUs, our coexistence list has a gap — surface it rather
+			// than silently double-booking.
+			klog.InfoS("unrecognized DRA drivers publish for this node (no coexistence demotion applied)", "drivers", foreign)
+			prevForeign = foreign
 		}
 		opts.VendorManagedGPUs = vm
 	}
@@ -181,15 +209,26 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 		klog.ErrorS(err, "uevent listener unavailable (needs hostNetwork); ticker-only probing")
 		uevents = nil // nil channel: select arm never fires
 	}
+	observe.HotplugListener(uevents != nil)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	prev := devices
+	logInventory(devices)
 	for {
 		select {
 		case <-ctx.Done():
 			klog.InfoS("shutting down")
 			return nil
-		case <-uevents:
+		case _, ok := <-uevents:
+			if !ok {
+				// Listener died mid-run (fatal read error): degrade to
+				// ticker-only, visibly.
+				uevents = nil
+				observe.HotplugListener(false)
+				klog.ErrorS(nil, "hotplug listener stopped; ticker-only probing")
+				continue
+			}
+			observe.HotplugWakeup()
 			klog.InfoS("uevent-triggered re-probe")
 		case <-ticker.C:
 		}
@@ -203,6 +242,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 		changed := !resourceslice.DevicesDeepEqual(prev, devices)
 		if changed {
 			klog.InfoS("inventory changed; updating resourceslices", "devices", len(devices))
+			logInventory(devices)
 			prev = devices
 		}
 		// Always push desired state, changed or not: Update re-queues a
@@ -219,6 +259,7 @@ func run(kubeconfig, nodeName, sysRoot, procRoot, llmfitBin, llmfitURL string, i
 func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, detector *llmfit.Detector, nodeName string, inv *nodeplugin.Inventory, opts publisher.Options) ([]resourceapi.Device, *resourceslice.DriverResources, error) {
 	probed, err := prober.Walk()
 	if err != nil {
+		observe.ProbeError("walk")
 		return nil, nil, fmt.Errorf("device tree walk: %w", err)
 	}
 	// Keep the kubelet plugin's view in lockstep with what we publish:
@@ -226,12 +267,14 @@ func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, d
 	inv.Set(probed)
 	ram, err := prober.MemTotalBytes()
 	if err != nil {
+		observe.ProbeError("meminfo")
 		return nil, nil, fmt.Errorf("reading system RAM: %w", err)
 	}
 	// llmfit is the preferred capability source; degrade to the embedded
 	// index rather than failing the whole publish if it breaks.
 	sys, err := detector.Detect(ctx)
 	if err != nil {
+		observe.ProbeError("detect")
 		klog.ErrorS(err, "llmfit detection failed; falling back to embedded index")
 		sys = nil
 		observe.SetCapabilitySource("index")
@@ -240,7 +283,66 @@ func desiredState(ctx context.Context, prober *probe.Prober, idx *index.Index, d
 		observe.SetCapabilitySource(detector.Transport())
 	}
 	devices := publisher.BuildDevices(probed, idx, ram, sys, opts)
+	observe.SetInventory(deviceInfos(devices))
 	return devices, publisher.BuildResources(nodeName, devices), nil
+}
+
+// attrStr/attrBool read published device attributes for the gauges and the
+// inventory log — the attributes are the single source of truth for what was
+// actually published.
+func attrStr(d resourceapi.Device, key string) string {
+	if a, ok := d.Attributes[resourceapi.QualifiedName(key)]; ok && a.StringValue != nil {
+		return *a.StringValue
+	}
+	return ""
+}
+
+func attrBool(d resourceapi.Device, key string) bool {
+	if a, ok := d.Attributes[resourceapi.QualifiedName(key)]; ok && a.BoolValue != nil {
+		return *a.BoolValue
+	}
+	return false
+}
+
+func deviceInfos(devices []resourceapi.Device) []observe.DeviceInfo {
+	infos := make([]observe.DeviceInfo, 0, len(devices))
+	for _, d := range devices {
+		infos = append(infos, observe.DeviceInfo{
+			Kind:          attrStr(d, "kind"),
+			Vendor:        attrStr(d, "vendor"),
+			Driver:        attrStr(d, "driver"),
+			Healthy:       attrBool(d, "healthy"),
+			VendorManaged: attrBool(d, "vendorManaged"),
+		})
+	}
+	return infos
+}
+
+// logInventory prints one line per published device — "devices: 5" alone
+// forces sysfs spelunking to find out WHAT changed on a node.
+func logInventory(devices []resourceapi.Device) {
+	for _, d := range devices {
+		mem := ""
+		if c, ok := d.Capacity["memory"]; ok {
+			mem = c.Value.String()
+		}
+		bw := int64(0)
+		if a, ok := d.Attributes["memoryBandwidthGBs"]; ok && a.IntValue != nil {
+			bw = *a.IntValue
+		}
+		klog.InfoS("published device",
+			"name", d.Name,
+			"kind", attrStr(d, "kind"),
+			"vendor", attrStr(d, "vendor"),
+			"driver", attrStr(d, "driver"),
+			"model", attrStr(d, "model"),
+			"source", attrStr(d, "source"),
+			"memory", mem,
+			"bandwidthGBs", bw,
+			"healthy", attrBool(d, "healthy"),
+			"vendorManaged", attrBool(d, "vendorManaged"),
+		)
+	}
 }
 
 func buildConfig(kubeconfig string) (*rest.Config, error) {

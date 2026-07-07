@@ -22,8 +22,23 @@ const (
 // lockstep by the golden test. Every optional lookup is membership-guarded:
 // a missing attribute must mean "no match", not a CEL runtime error that
 // disqualifies the node (llmfit#669).
-func FitCEL(b *Bounds) string {
+//
+// The CPU class is the one deliberate divergence: CPU devices publish no
+// memoryBandwidthGBs (llmfit has no per-platform DRAM-bandwidth data), so
+// keeping the bandwidth clause would make cpu.llmfit.ai structurally
+// unsatisfiable for every ModelClaim. Naming the CPU class is an explicit
+// "I accept CPU speed" — the memory fit still holds; the tok/s floor is
+// waived.
+func FitCEL(b *Bounds, deviceClassName string) string {
 	d := DriverDomain
+	if deviceClassName == "cpu."+d {
+		return fmt.Sprintf(
+			"'memory' in device.capacity['%[1]s'] && "+
+				"device.capacity['%[1]s'].memory.compareTo(quantity('%[2]dGi')) >= 0 && "+
+				"'healthy' in device.attributes['%[1]s'] && "+
+				"device.attributes['%[1]s'].healthy",
+			d, b.MemoryGi)
+	}
 	return fmt.Sprintf(
 		"'memory' in device.capacity['%[1]s'] && "+
 			"device.capacity['%[1]s'].memory.compareTo(quantity('%[2]dGi')) >= 0 && "+
@@ -40,7 +55,7 @@ func FitCEL(b *Bounds) string {
 // ANDs all selectors on a request).
 func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
 	selectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b)},
+		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b, deviceClassName)},
 	}}
 	for _, cel := range extraSelectors {
 		if s := strings.TrimSpace(cel); s != "" {
@@ -53,7 +68,7 @@ func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName str
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      mc.GetName(),
 			Namespace: mc.GetNamespace(),
-			Labels:    map[string]string{ManagedByLabel: mc.GetName()},
+			Labels:    map[string]string{ManagedByLabel: labelValue(mc.GetName())},
 			Annotations: map[string]string{
 				"llmfit.ai/model":            b.Model,
 				"llmfit.ai/quant":            b.Quant,
@@ -82,6 +97,18 @@ func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName str
 			},
 		},
 	}
+}
+
+// labelValue makes s a valid label value: CR names may run to 253 chars but
+// label values cap at 63 — a too-long name must not make the template
+// permanently uncreatable. Ownership does not ride on this label (that's the
+// controller ownerRef); it is informational.
+func labelValue(s string) string {
+	if len(s) <= 63 {
+		return s
+	}
+	s = s[:63]
+	return strings.TrimRight(s, "-_.")
 }
 
 // TemplateNeedsUpdate reports whether the live template's spec or managed

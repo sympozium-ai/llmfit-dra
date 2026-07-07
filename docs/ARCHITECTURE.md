@@ -232,18 +232,39 @@ driver's job on nodes where one runs.
 
 ## Observability and day-2 operations
 
-The driver is built to degrade quietly, so it must report loudly. It serves
-`/metrics`, `/healthz`, and `/readyz` on a hostNetwork port (default `:9099`,
-scrape at `nodeIP:9099`):
+The driver is built to degrade quietly, so it must report loudly. Both
+components serve `/metrics`, `/healthz`, and `/readyz`: the node agent on a
+hostNetwork port (default `:9099`, scrape at `nodeIP:9099`), the ModelClaim
+controller on its own pod port. Discovery is `prometheus.io/*` pod
+annotations by default, plus an optional PodMonitor
+(`metrics.podMonitor.enabled`) for prometheus-operator.
 
-- **Metrics** (`internal/observe`): `capability_source{source=…}` (1 on the
-  active transport, so a fleet-wide fallback is one query),
-  `degraded_cycles_total`, `probe_duration_seconds`, `slice_updates_total`,
-  and `prepare_total{result}` / `unprepare_total{result}`.
+- **Inventory** (the thing that differs across a heterogeneous fleet):
+  `devices{kind,vendor,driver,healthy}` and
+  `devices_vendor_managed{kind,driver}` are reset+set each probe cycle, so a
+  disappearing card, a health flip, or a coexistence demotion is a metric
+  change — and each cycle that changes the published set also logs one
+  `published device` line per device (name, model, source, memory,
+  bandwidth, health).
+- **Degradation** (`internal/observe`): `capability_source{source=…}` (1 on
+  the active transport, so a fleet-wide fallback is one query),
+  `degraded_cycles_total`, `probe_errors_total{stage}`,
+  `hotplug_listener_up`, and `slice_publish_errors_total{kind}` — the
+  resourceslice helper's ErrorHandler surfaces API rejections and
+  `dropped_fields` (e.g. taints on a server without the feature gate) that
+  would otherwise vanish into its internal logs.
+- **Data plane**: `prepare_total{result,reason}` (reason distinguishes
+  no_allocation / device_missing / foreign_only / cdi_write),
+  `prepare_duration_seconds`, the unprepare pair,
+  `cdi_orphans_removed_total`, and `hotplug_wakeups_total`.
+- **Controller**: `resolve_duration_seconds{result}` (ok|error|cached — the
+  resolver memoizes by spec tuple) and `modelclaim_reconciles_total{result}`,
+  plus Kubernetes Events on Satisfiable *transitions* only.
 - **Liveness** (`/healthz`) fails if the reconcile loop hasn't completed a
   cycle within three probe intervals — a hung loop becomes a failing probe,
   not a silent 1/1-Running node. **Readiness** (`/readyz`) goes true only
-  after the publisher and plugin start.
+  after the publisher and plugin start (node agent) or informer cache sync
+  (controller).
 
 **Rollout.** The DaemonSet uses `maxUnavailable: 1` (not `maxSurge` — the pod
 is hostNetwork, so two instances can't share the node's ports). The kubelet
@@ -252,6 +273,40 @@ UID-suffixed socket so the kubelet keeps a prepared node across the restart,
 and an immutable pinned image with `imagePullPolicy: IfNotPresent` means the
 restart involves no pull — the per-node window is a fast restart, and the
 node-critical container can recover from cache during a registry outage.
+
+### Operational caveats
+
+- **Uninstall leaves ResourceSlices behind.** `controller.Stop()`
+  deliberately keeps slices published across restarts, so `helm uninstall`
+  leaves healthy-looking inventory with no plugin behind it — pods schedule,
+  then wedge at prepare. The admission policy blocks the driver's own SA
+  from cross-node cleanup *by design*; clean up with cluster-admin after
+  uninstall:
+  `kubectl delete resourceslices --all-namespaces --field-selector spec.driver=llmfit.ai`
+  (or delete per node). Slices are also node-owned, so deleting a node GCs
+  its slices.
+- **NVIDIA nodes need `nvidia_drm` loaded.** The probe walks
+  `/sys/class/drm`; a headless datacenter install without the DRM modeset
+  module publishes *no* NVIDIA GPU at all. (The GPU is fitness-only either
+  way — the plugin never injects CUDA — but for the fitness-companion
+  pattern the attributes must exist.)
+- **Non-root workloads need the render/video GIDs.** The CDI specs inject
+  bare device nodes (`/dev/dri/renderD*`, `/dev/kfd`, `/dev/accel/*`),
+  whose host permissions are typically `root:render 0660`. Root containers
+  (all shipped examples) work; a `runAsNonRoot` pod must add the node's
+  `render` (and where applicable `video`) GID via
+  `securityContext.supplementalGroups`, or it gets EACCES at open.
+- **Classic device plugins are invisible to coexistence.** The vendor
+  demotion watches vendor *DRA drivers'* ResourceSlices. A device plugin
+  (e.g. ROCm's `amd.com/gpu`) publishes extended resources, not slices —
+  running one beside llmfit-dra double-books the silicon. Unsupported; run
+  one or the other per node. Unrecognized DRA drivers publishing for the
+  node are logged (`unrecognized DRA drivers publish for this node`) so a
+  gap in `vendorDrivers` is visible.
+- **Multi-GPU AMD isolation** relies on amdgpu's sysfs `unique_id`
+  (`ROCR_VISIBLE_DEVICES`); ASICs without it (common on APUs) fall back to
+  KFD-visible-everything, logged at V(2). Single-GPU AMD nodes are
+  unaffected.
 
 ## Security model
 

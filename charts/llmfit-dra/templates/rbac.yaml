@@ -8,6 +8,10 @@ metadata:
     {{- include "llmfit-dra.labels" . | nindent 4 }}
 ---
 {{- end }}
+# Node-agent role: everything the per-node DaemonSet needs — and nothing the
+# controller holds. The split matters because every node's kubelet-scoped pod
+# carries this identity: a compromised node must not be able to plant
+# ResourceClaimTemplates in arbitrary namespaces or rewrite ModelClaim status.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -30,25 +34,6 @@ rules:
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims"]
     verbs: ["get", "list"]
-  # ModelClaim controller: reconcile ModelClaims into same-named
-  # ResourceClaimTemplates and report status/satisfiability.
-  - apiGroups: ["llmfit.ai"]
-    resources: ["modelclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["llmfit.ai"]
-    resources: ["modelclaims/status"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaimtemplates"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Availability in the Satisfiable condition: watch which devices are held
-  # by allocated claims (issue #21).
-  - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -64,3 +49,66 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "llmfit-dra.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.modelClaimController.enabled }}
+---
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "llmfit-dra.controllerServiceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelclaim-controller
+---
+{{- end }}
+# ModelClaim-controller role: cluster-scoped reconciliation only. It is also
+# deliberately NOT bound to the admission policy's driver identity, so a
+# future uninstall/cleanup job can reuse it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelclaim-controller
+rules:
+  # Reconcile ModelClaims into same-named ResourceClaimTemplates and report
+  # status/satisfiability.
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaimtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Satisfiable condition inputs: published devices, and which are held by
+  # allocated claims (issue #21).
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: modelclaim-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "llmfit-dra.controllerServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

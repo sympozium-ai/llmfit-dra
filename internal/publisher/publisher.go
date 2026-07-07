@@ -7,16 +7,20 @@ package publisher
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
+	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 )
 
@@ -58,6 +62,18 @@ type Options struct {
 // the embedded index, bare probe facts. The probe always supplies identity
 // (PCI address, root, driver). systemRAM sizes unified-memory devices.
 func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sys *llmfit.System, opts Options) []resourceapi.Device {
+	// Probed GPU counts gate the llmfit⋈probe pairing: one llmfit entry may
+	// only serve several probed cards when they are identical models
+	// (entry.Count covers them). Counting up front keeps matchLLMFitGPU pure.
+	probedGPUs := 0
+	probedGPUsByVendor := map[string]int{}
+	for _, d := range devices {
+		if d.Kind == probe.KindGPU {
+			probedGPUs++
+			probedGPUsByVendor[vendorName(d.PCIVendor)]++
+		}
+	}
+
 	out := make([]resourceapi.Device, 0, len(devices))
 	for _, d := range devices {
 		healthy, reason := d.Healthy()
@@ -113,7 +129,7 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			// VRAM file" is what NVIDIA's proprietary driver looks like too,
 			// so it must not imply unified memory.
 			var unified *bool
-			lf := matchLLMFitGPU(sys, d, vendor)
+			lf := matchLLMFitGPU(sys, d, vendor, probedGPUsByVendor[vendor], probedGPUs)
 			entry, found := idx.Lookup(d.PCIVendor, d.PCIDevice)
 			attrs["indexed"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(found)}
 			switch {
@@ -176,10 +192,14 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			// models onto cards that cannot hold them.
 			if memBytes == 0 {
 				switch {
+				case unified != nil && *unified:
+					// Unified pool first: on APUs the sysfs VRAM file is the
+					// BIOS UMA carve-out (often <4Gi of a >64Gi pool), so a
+					// llmfit outage must not collapse a Strix Halo's capacity
+					// to the carve-out. Take whichever is larger.
+					memBytes = max(d.VRAMBytes, systemRAM)
 				case d.VRAMBytes > 0:
 					memBytes = d.VRAMBytes
-				case unified != nil && *unified:
-					memBytes = systemRAM
 				}
 			}
 		}
@@ -207,13 +227,15 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 
 // matchLLMFitGPU pairs a probed GPU with an llmfit-reported GPU by vendor.
 // llmfit groups IDENTICAL models into one entry (count > 1), so a single
-// same-vendor entry legitimately serves several probed cards. Two or more
-// same-vendor entries mean different models — vendor alone cannot say which
-// probed card is which, and guessing applies the first card's bandwidth and
-// memory to all of them. Ambiguity returns nil: the per-PCI-ID index gives
+// same-vendor entry legitimately serves several probed cards — but only as
+// many as the entry's count covers. When the probe sees MORE same-vendor
+// cards than llmfit reported (llmfit under-reports: ROCm sees the supported
+// dGPU but not the iGPU next to it), vendor alone cannot say which probed
+// card the entry describes. Two or more same-vendor entries are ambiguous
+// for the same reason. Both cases return nil: the per-PCI-ID index gives
 // each card its own correct numbers instead. (Per-instance pairing needs
 // llmfit to report PCI identity — tracked upstream.)
-func matchLLMFitGPU(sys *llmfit.System, d probe.Device, vendor string) *llmfit.GPU {
+func matchLLMFitGPU(sys *llmfit.System, d probe.Device, vendor string, sameVendorProbed, totalProbed int) *llmfit.GPU {
 	if sys == nil || d.Kind != probe.KindGPU {
 		return nil
 	}
@@ -227,11 +249,21 @@ func matchLLMFitGPU(sys *llmfit.System, d probe.Device, vendor string) *llmfit.G
 		}
 	}
 	if match != nil {
+		covered := int(match.Count)
+		if covered == 0 {
+			covered = 1
+		}
+		if sameVendorProbed > covered {
+			return nil // llmfit under-reported this vendor: pairing unknowable
+		}
 		return match
 	}
-	// Single GPU on both sides: trust the pairing even if the vendor
-	// heuristic can't classify the llmfit name.
-	if len(sys.GPUs) == 1 {
+	// Last resort — one GPU on BOTH sides and an llmfit name too generic to
+	// classify: only then trust the pairing. A classifiable-but-different
+	// vendor is a real mismatch (llmfit priced a card the probe attributes
+	// to another vendor — e.g. a BMC framebuffer next to the real GPU) and
+	// must never inherit its capability.
+	if len(sys.GPUs) == 1 && totalProbed == 1 && llmfit.VendorOf(sys.GPUs[0]) == "" {
 		return &sys.GPUs[0]
 	}
 	return nil
@@ -251,6 +283,9 @@ func BuildResources(nodeName string, devices []resourceapi.Device) *resourceslic
 
 // Start launches the resourceslice helper controller with node ownership, so
 // slices are garbage-collected with the node and identified via spec.nodeName.
+// The ErrorHandler surfaces write failures the helper would otherwise keep to
+// its own logs — API rejections and DroppedFieldsError (fields like taints
+// silently dropped by a server without the feature gate).
 func Start(ctx context.Context, client kubernetes.Interface, nodeName string, resources *resourceslice.DriverResources) (*resourceslice.Controller, error) {
 	return resourceslice.StartController(ctx, resourceslice.Options{
 		DriverName: DriverName,
@@ -261,6 +296,15 @@ func Start(ctx context.Context, client kubernetes.Interface, nodeName string, re
 			Name:       nodeName,
 		},
 		Resources: resources,
+		ErrorHandler: func(ctx context.Context, err error, msg string) {
+			var dropped *resourceslice.DroppedFieldsError
+			kind := "api"
+			if errors.As(err, &dropped) {
+				kind = "dropped_fields"
+			}
+			observe.SlicePublishError(kind)
+			klog.FromContext(ctx).Error(err, "resourceslice publish: "+msg, "kind", kind)
+		},
 	})
 }
 
@@ -288,9 +332,16 @@ func vendorName(pciVendor string) string {
 	}
 }
 
+// truncate caps s at n bytes without splitting a multi-byte rune — an
+// invalid-UTF-8 attribute value would make the API server reject the whole
+// ResourceSlice write.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	s = s[:n]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }

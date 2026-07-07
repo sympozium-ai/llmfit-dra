@@ -31,7 +31,7 @@ func testBounds() *Bounds {
 // FitCEL must stay in lockstep with llmfit-core claim.rs render(): guarded
 // membership checks so missing attributes are non-matches, not CEL errors.
 func TestFitCELGolden(t *testing.T) {
-	cel := FitCEL(testBounds())
+	cel := FitCEL(testBounds(), DriverDomain)
 	for _, want := range []string{
 		"'memory' in device.capacity['llmfit.ai']",
 		"device.capacity['llmfit.ai'].memory.compareTo(quantity('18Gi')) >= 0",
@@ -42,6 +42,24 @@ func TestFitCELGolden(t *testing.T) {
 	} {
 		if !strings.Contains(cel, want) {
 			t.Errorf("FitCEL missing %q in:\n%s", want, cel)
+		}
+	}
+}
+
+func TestFitCELCPUClassWaivesBandwidth(t *testing.T) {
+	// CPU devices publish no memoryBandwidthGBs; the cpu class would be
+	// structurally unsatisfiable if the fit CEL demanded it. Memory and
+	// health still hold.
+	cel := FitCEL(testBounds(), "cpu.llmfit.ai")
+	if strings.Contains(cel, "memoryBandwidthGBs") {
+		t.Errorf("cpu-class fit CEL must not require bandwidth:\n%s", cel)
+	}
+	for _, want := range []string{
+		"device.capacity['llmfit.ai'].memory.compareTo(quantity('18Gi')) >= 0",
+		"device.attributes['llmfit.ai'].healthy",
+	} {
+		if !strings.Contains(cel, want) {
+			t.Errorf("cpu-class fit CEL missing %q in:\n%s", want, cel)
 		}
 	}
 }

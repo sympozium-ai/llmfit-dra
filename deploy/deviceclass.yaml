@@ -14,6 +14,9 @@
 # devices, so an absence check suffices — and a custom class WITHOUT this
 # exclusion deliberately re-enables the fitness-companion matchAttribute
 # pattern beside the vendor driver.
+# Every accelerator class also requires healthy: an unhealthy device
+# (driverUnbound, ECC) has no usable /dev node to inject — allocating it
+# fails the pod at container create, after scheduling.
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
@@ -23,7 +26,8 @@ spec:
     - cel:
         expression: >-
           device.driver == "llmfit.ai" &&
-          !('vendorManaged' in device.attributes["llmfit.ai"])
+          !('vendorManaged' in device.attributes["llmfit.ai"]) &&
+          device.attributes["llmfit.ai"].healthy
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
@@ -35,7 +39,8 @@ spec:
         expression: >-
           device.driver == "llmfit.ai" &&
           device.attributes["llmfit.ai"].kind == "gpu" &&
-          !('vendorManaged' in device.attributes["llmfit.ai"])
+          !('vendorManaged' in device.attributes["llmfit.ai"]) &&
+          device.attributes["llmfit.ai"].healthy
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
@@ -46,7 +51,8 @@ spec:
     - cel:
         expression: >-
           device.driver == "llmfit.ai" &&
-          device.attributes["llmfit.ai"].kind == "npu"
+          device.attributes["llmfit.ai"].kind == "npu" &&
+          device.attributes["llmfit.ai"].healthy
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass

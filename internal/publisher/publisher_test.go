@@ -2,6 +2,7 @@ package publisher
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -328,6 +329,112 @@ func TestMatchLLMFitGPURefusesAmbiguity(t *testing.T) {
 	}, mustIndex(t), systemRAM, sys, Options{})
 	assertStr(t, devices[0].Attributes, "source", "index")
 	assertStr(t, devices[0].Attributes, "model", "AMD Radeon RX 7900 XTX")
+}
+
+func TestMatchLLMFitGPURefusesUnderReport(t *testing.T) {
+	// llmfit reports ONE AMD entry (ROCm only saw the supported dGPU) but the
+	// probe sees TWO different AMD cards (iGPU + dGPU). Vendor pairing cannot
+	// say which card the entry describes — both must fall to the PCI-ID index
+	// instead of inheriting the dGPU's bandwidth and memory.
+	bw := 960.0
+	vram := 24.0
+	sys := &llmfit.System{HasGPU: true, GPUs: []llmfit.GPU{
+		{Name: "AMD Radeon RX 7900 XTX", Backend: "ROCm", Count: 1, VRAMGB: &vram, MemoryBandwidthGBps: &bw},
+	}}
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "744c", PCIAddr: "0000:01:00.0", Driver: "amdgpu", VRAMBytes: 24 << 30},
+		{Kind: probe.KindGPU, Index: 1, PCIVendor: "1002", PCIDevice: "1586", PCIAddr: "0000:c3:00.0", Driver: "amdgpu", VRAMBytes: 4 << 30},
+	}, mustIndex(t), systemRAM, sys, Options{})
+	byName := map[string]k8sDevice{}
+	for _, d := range devices {
+		byName[d.Name] = d
+	}
+	for name := range byName {
+		assertStr(t, byName[name].Attributes, "source", "index")
+	}
+	// The iGPU must NOT have inherited the dGPU's numbers.
+	assertStr(t, byName["gpu-0000-c3-00-0"].Attributes, "model", "AMD Radeon 8060S (Strix Halo)")
+	assertInt(t, byName["gpu-0000-c3-00-0"].Attributes, "memoryBandwidthGBs", 256)
+}
+
+func TestMatchLLMFitGPURefusesCrossVendorFallback(t *testing.T) {
+	// llmfit (CUDA backend) reports only the NVIDIA card; the probe also sees
+	// a second GPU of another vendor (BMC framebuffer, or an Intel iGPU). The
+	// old single-entry fallback pinned the NVIDIA entry's capability onto the
+	// OTHER vendor's card — which, unlike the NVIDIA card, is allocatable.
+	bw := 1008.0
+	vram := 24.0
+	sys := &llmfit.System{HasGPU: true, GPUs: []llmfit.GPU{
+		{Name: "NVIDIA GeForce RTX 4090", Backend: "CUDA", Count: 1, VRAMGB: &vram, MemoryBandwidthGBps: &bw},
+	}}
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "10de", PCIDevice: "2684", PCIAddr: "0000:41:00.0", Driver: "nvidia", VRAMBytes: 24 << 30},
+		{Kind: probe.KindGPU, Index: 1, PCIVendor: "1a03", PCIDevice: "2000", PCIAddr: "0000:02:00.0", Driver: "ast"},
+	}, mustIndex(t), systemRAM, sys, Options{})
+	byName := map[string]k8sDevice{}
+	for _, d := range devices {
+		byName[d.Name] = d
+	}
+	bmc := byName["gpu-0000-02-00-0"]
+	if got := *bmc.Attributes["model"].StringValue; got == "NVIDIA GeForce RTX 4090" {
+		t.Fatalf("BMC framebuffer inherited the NVIDIA GPU's identity: %q", got)
+	}
+	if _, ok := bmc.Attributes["memoryBandwidthGBs"]; ok {
+		t.Error("BMC framebuffer must not inherit llmfit bandwidth")
+	}
+	if _, ok := bmc.Capacity["memory"]; ok {
+		t.Error("BMC framebuffer must not inherit llmfit memory capacity")
+	}
+	// The NVIDIA card itself still pairs by vendor.
+	assertStr(t, byName["gpu-0000-41-00-0"].Attributes, "source", "llmfit")
+}
+
+func TestMatchLLMFitGPUUnclassifiableSinglePair(t *testing.T) {
+	// One GPU on both sides and a name the vendor heuristic can't classify:
+	// the pairing is still trusted (this is the legitimate fallback case).
+	bw := 256.0
+	sys := &llmfit.System{HasGPU: true, GPUs: []llmfit.GPU{
+		{Name: "Generic Display Adapter", Backend: "Vulkan", Count: 1, MemoryBandwidthGBps: &bw},
+	}}
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "abcd", PCIDevice: "1234", PCIAddr: "0000:03:00.0", Driver: "mystery"},
+		{Kind: probe.KindCPU, Index: 0, SystemRAMBytes: systemRAM},
+	}, mustIndex(t), systemRAM, sys, Options{})
+	for _, d := range devices {
+		if d.Name == "gpu-0000-03-00-0" {
+			assertStr(t, d.Attributes, "source", "llmfit")
+			return
+		}
+	}
+	t.Fatal("gpu not built")
+}
+
+func TestBuildDevicesUnifiedPoolBeatsCarveOut(t *testing.T) {
+	// llmfit down (sys=nil), indexed unified APU (Strix Halo): the sysfs VRAM
+	// file is the BIOS carve-out, not the pool — capacity must be system RAM,
+	// not the carve-out.
+	devices := BuildDevices([]probe.Device{
+		{Kind: probe.KindGPU, Index: 0, PCIVendor: "1002", PCIDevice: "1586", PCIAddr: "0000:c3:00.0", Driver: "amdgpu", VRAMBytes: 4 << 30},
+	}, mustIndex(t), systemRAM, nil, Options{})
+	assertStr(t, devices[0].Attributes, "source", "index")
+	assertBool(t, devices[0].Attributes, "unifiedMemory", true)
+	assertMemory(t, devices[0], int64(systemRAM))
+}
+
+func TestTruncateUTF8Safe(t *testing.T) {
+	// A multi-byte rune spanning the cut must be dropped, not split — an
+	// invalid-UTF-8 attribute rejects the entire ResourceSlice write.
+	s := "0123456789012345678901234567890123456789012345678901234567890™xyz"
+	got := truncate(s, 64)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncate produced invalid UTF-8: %q", got)
+	}
+	if len(got) > 64 {
+		t.Fatalf("truncate exceeded limit: %d bytes", len(got))
+	}
+	if truncate("short", 64) != "short" {
+		t.Error("short strings must pass through")
+	}
 }
 
 func TestBuildDevicesVendorManagedDemotesGPUsOnly(t *testing.T) {

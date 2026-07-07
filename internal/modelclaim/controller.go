@@ -3,7 +3,9 @@ package modelclaim
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -18,6 +20,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+
+	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 )
 
 // GVR of the ModelClaim custom resource.
@@ -27,6 +31,11 @@ const (
 	condResolved    = "Resolved"
 	condSatisfiable = "Satisfiable"
 )
+
+// modelRefPattern admits catalog names and HuggingFace-style org/name repo
+// ids. First character alphanumeric, so a value can never read as a CLI flag
+// to the exec resolver.
+var modelRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$`)
 
 // Controller reconciles ModelClaims into same-named ResourceClaimTemplates.
 // Availability model: if this controller is down, existing templates keep
@@ -41,7 +50,31 @@ type Controller struct {
 	mcInformer    cache.SharedIndexInformer
 	sliceInformer cache.SharedIndexInformer
 	claimInformer cache.SharedIndexInformer
+
+	// Health is optional liveness/readiness plumbing: Ready fires after
+	// cache sync, Beat on every processed item plus an idle tick.
+	Health *observe.Health
+
+	// resolveCache memoizes bounds by spec tuple: slice/claim churn re-runs
+	// reconcile for every ModelClaim, and without the cache each run forks
+	// the llmfit binary to recompute numbers that only change with the spec
+	// (or a DB update — hence the TTL, matching the informer resync).
+	resolveMu    sync.Mutex
+	resolveCache map[string]resolveEntry
+
+	// lastEvent suppresses consecutive duplicate events per object+reason —
+	// a persistently failing resolve must not mint a fresh Event object on
+	// every rate-limited retry.
+	eventMu   sync.Mutex
+	lastEvent map[string]string
 }
+
+type resolveEntry struct {
+	bounds  *Bounds
+	expires time.Time
+}
+
+const resolveCacheTTL = 10 * time.Minute
 
 func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) *Controller {
 	c := &Controller{
@@ -50,6 +83,8 @@ func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) 
 		resolver: resolver,
 		queue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.DefaultTypedControllerRateLimiter[string]()),
+		resolveCache: map[string]resolveEntry{},
+		lastEvent:    map[string]string{},
 	}
 
 	dynFactory := dynamicinformer.NewDynamicSharedInformerFactory(dyn, 10*time.Minute)
@@ -61,25 +96,57 @@ func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) 
 	})
 
 	// ResourceSlice changes refresh Satisfiable for every claim (cheap: the
-	// resync is a static evaluation over cached slices).
+	// resync is a static evaluation over cached slices). Only OUR slices —
+	// every other driver's churn is noise here.
 	factory := informers.NewSharedInformerFactory(client, 10*time.Minute)
 	c.sliceInformer = factory.Resource().V1().ResourceSlices().Informer()
 	c.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(any) { c.enqueueAll() },
-		UpdateFunc: func(_, obj any) { c.enqueueAll() },
-		DeleteFunc: func(any) { c.enqueueAll() },
+		AddFunc:    func(obj any) { c.enqueueAllIf(ownSlice(obj)) },
+		UpdateFunc: func(old, obj any) { c.enqueueAllIf(ownSlice(old) || ownSlice(obj)) },
+		DeleteFunc: func(obj any) { c.enqueueAllIf(ownSlice(obj)) },
 	})
 
 	// ResourceClaim allocations move devices between held and available, so
-	// they refresh Satisfiable's availability numbers too (issue #21).
+	// they refresh Satisfiable's availability numbers too (issue #21). Only
+	// claims that hold (or held) one of our devices matter — per-pod claim
+	// churn from other drivers must not fan out to every ModelClaim.
 	c.claimInformer = factory.Resource().V1().ResourceClaims().Informer()
 	c.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(any) { c.enqueueAll() },
-		UpdateFunc: func(_, obj any) { c.enqueueAll() },
-		DeleteFunc: func(any) { c.enqueueAll() },
+		AddFunc:    func(obj any) { c.enqueueAllIf(holdsOurDevice(obj)) },
+		UpdateFunc: func(old, obj any) { c.enqueueAllIf(holdsOurDevice(old) || holdsOurDevice(obj)) },
+		DeleteFunc: func(obj any) { c.enqueueAllIf(holdsOurDevice(obj)) },
 	})
 
 	return c
+}
+
+// ownSlice reports whether the informer object is one of this driver's
+// ResourceSlices (tombstone-safe).
+func ownSlice(obj any) bool {
+	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	s, ok := obj.(*resourceapi.ResourceSlice)
+	return ok && s.Spec.Driver == DriverDomain
+}
+
+// holdsOurDevice reports whether the claim's allocation includes one of this
+// driver's devices (tombstone-safe). Unallocated claims are irrelevant to
+// Satisfiable's availability numbers.
+func holdsOurDevice(obj any) bool {
+	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	rc, ok := obj.(*resourceapi.ResourceClaim)
+	if !ok || rc.Status.Allocation == nil {
+		return false
+	}
+	for _, r := range rc.Status.Allocation.Devices.Results {
+		if r.Driver == DriverDomain {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Controller) enqueue(obj any) {
@@ -94,10 +161,16 @@ func (c *Controller) enqueueAll() {
 	}
 }
 
-// Run starts informers and the reconcile loop; blocks until ctx is done.
-func (c *Controller) Run(ctx context.Context, workers int) error {
-	defer c.queue.ShutDown()
+func (c *Controller) enqueueAllIf(relevant bool) {
+	if relevant {
+		c.enqueueAll()
+	}
+}
 
+// Run starts informers and the reconcile loop; blocks until ctx is done,
+// then drains workers so shutdown cannot interrupt a template
+// delete-then-recreate mid-flight.
+func (c *Controller) Run(ctx context.Context, workers int) error {
 	go c.mcInformer.Run(ctx.Done())
 	go c.sliceInformer.Run(ctx.Done())
 	go c.claimInformer.Run(ctx.Done())
@@ -105,14 +178,38 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 		return fmt.Errorf("informer caches did not sync")
 	}
 	klog.FromContext(ctx).Info("modelclaim controller started")
-
-	for i := 0; i < workers; i++ {
+	if c.Health != nil {
+		c.Health.Ready()
+		c.Health.Beat()
+		// Idle heartbeat: liveness must not fail on a quiet cluster where no
+		// item arrives within the staleness window. Worker beats (processNext)
+		// cover the busy case.
 		go func() {
+			t := time.NewTicker(30 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					c.Health.Beat()
+				}
+			}
+		}()
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			for c.processNext(ctx) {
 			}
 		}()
 	}
 	<-ctx.Done()
+	c.queue.ShutDown()
+	wg.Wait()
 	return nil
 }
 
@@ -123,11 +220,20 @@ func (c *Controller) processNext(ctx context.Context) bool {
 	}
 	defer c.queue.Done(key)
 
-	if err := c.reconcile(ctx, key); err != nil {
+	// Detached from shutdown cancellation (but bounded): a SIGTERM must not
+	// cancel a reconcile between a template delete and its recreate.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if err := c.reconcile(rctx, key); err != nil {
+		observe.ModelClaimReconcile("error")
 		klog.FromContext(ctx).Error(err, "reconcile failed", "modelclaim", key)
 		c.queue.AddRateLimited(key)
 	} else {
+		observe.ModelClaimReconcile("ok")
 		c.queue.Forget(key)
+	}
+	if c.Health != nil {
+		c.Health.Beat()
 	}
 	return true
 }
@@ -154,15 +260,37 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 	extraSelectors := strSlice(spec["extraSelectors"])
 
+	// ── Validate ───────────────────────────────────────────────────────
+	// The model reaches the llmfit binary as an argv token: reject anything
+	// that isn't a plain catalog/HF reference so a leading-dash value can
+	// never be parsed as a flag. Terminal until the spec changes — no requeue.
+	if !modelRefPattern.MatchString(model) {
+		msg := fmt.Sprintf("spec.model %q is not a valid model reference (want org/name or name, e.g. Qwen/Qwen3.6-30B-A3B)", model)
+		c.event(mc, "Warning", "InvalidModel", msg)
+		return c.updateStatus(ctx, ns, name, func(status map[string]any) {
+			setCondition(status, mc.GetGeneration(), condResolved, "False", "InvalidModel", msg)
+			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "InvalidModel", "model not resolved")
+		})
+	}
+
 	// ── Resolve ────────────────────────────────────────────────────────
-	bounds, resolveErr := c.resolver.Resolve(ctx, model, minTps, quant, efficiency)
+	bounds, resolveErr := c.resolve(ctx, model, minTps, quant, efficiency)
 	if resolveErr != nil {
 		// Never touch an existing template on resolve failure — a model-DB
 		// hiccup must not cascade into scheduling failures for new pods.
+		// Satisfiable goes Unknown in the same write: leaving the previous
+		// verdict (and printed columns) standing would contradict a False
+		// Resolved. The returned error requeues with backoff, so a transient
+		// failure on a NEW ModelClaim doesn't strand it template-less until
+		// the next resync.
 		c.event(mc, "Warning", "ResolveFailed", resolveErr.Error())
-		return c.updateStatus(ctx, ns, name, func(status map[string]any) {
+		if err := c.updateStatus(ctx, ns, name, func(status map[string]any) {
 			setCondition(status, mc.GetGeneration(), condResolved, "False", "ResolveFailed", resolveErr.Error())
-		})
+			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "ResolveFailed", "bounds unavailable while resolve fails")
+		}); err != nil {
+			return err
+		}
+		return fmt.Errorf("resolving model %q: %w", model, resolveErr)
 	}
 
 	// ── Reconcile the same-named ResourceClaimTemplate ─────────────────
@@ -179,6 +307,16 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 				name, bounds.MemoryGi, bounds.MinBandwidthGBs, bounds.Quant))
 	case err != nil:
 		return fmt.Errorf("getting template: %w", err)
+	case !metav1.IsControlledBy(live, mc):
+		// A same-named template we do NOT own: never adopt, never update,
+		// and above all never delete-recreate it. Terminal until the user
+		// renames one of the two — say so instead of clobbering.
+		msg := fmt.Sprintf("a ResourceClaimTemplate named %q already exists and is not managed by this ModelClaim; rename the ModelClaim or delete the template", name)
+		c.event(mc, "Warning", "TemplateConflict", msg)
+		return c.updateStatus(ctx, ns, name, func(status map[string]any) {
+			setCondition(status, mc.GetGeneration(), condResolved, "False", "TemplateConflict", msg)
+			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "TemplateConflict", "template not managed by this ModelClaim")
+		})
 	case TemplateNeedsUpdate(live, desired):
 		updated := live.DeepCopy()
 		updated.Spec = desired.Spec
@@ -209,6 +347,18 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 
 	// ── Satisfiability (advisory) ──────────────────────────────────────
 	cands := c.evaluateCandidates(bounds, deviceClass)
+	satStatus, satReason, satMsg := satisfiableCondition(cands)
+
+	// Events on TRANSITIONS only: `kubectl get events -w` during a rollout
+	// should show flips (fits→doesn't fit, restored), not one line per
+	// reconcile.
+	if prev := conditionReason(mc, condSatisfiable); prev != satReason {
+		kind := "Normal"
+		if satStatus == "False" {
+			kind = "Warning"
+		}
+		c.event(mc, kind, satReason, satMsg)
+	}
 
 	return c.updateStatus(ctx, ns, name, func(status map[string]any) {
 		status["observedGeneration"] = mc.GetGeneration()
@@ -228,22 +378,76 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		setCondition(status, mc.GetGeneration(), condResolved, "True", "Resolved",
 			fmt.Sprintf("%s @ %s: memory>=%dGi, bandwidth>=%dGB/s",
 				bounds.Model, bounds.Quant, bounds.MemoryGi, bounds.MinBandwidthGBs))
-		switch {
-		case cands.Devices > 0 && cands.Available > 0:
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "True", "DevicesAvailable",
-				fmt.Sprintf("%d device(s) on %d node(s) satisfy the bounds (%d currently unallocated)",
-					cands.Devices, cands.Nodes, cands.Available))
-		case cands.Devices > 0:
-			// Physics fits but every matching device is held by another
-			// claim: satisfiable in principle, queued in practice — say so
-			// (issue #21; this exact ambiguity misled a live operator).
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "True", "AllDevicesHeld",
-				fmt.Sprintf("%d device(s) satisfy the bounds but 0 are unallocated (e.g. held by %s) — pods will queue until a claim releases",
-					cands.Devices, cands.HeldBy))
-		default:
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "False", "NoCandidates", cands.Shortfall)
-		}
+		setCondition(status, mc.GetGeneration(), condSatisfiable, satStatus, satReason, satMsg)
 	})
+}
+
+// satisfiableCondition maps a candidates snapshot to the Satisfiable
+// condition tuple.
+func satisfiableCondition(cands Candidates) (status, reason, message string) {
+	switch {
+	case cands.Devices > 0 && cands.Available > 0:
+		return "True", "DevicesAvailable",
+			fmt.Sprintf("%d device(s) on %d node(s) satisfy the bounds (%d currently unallocated)",
+				cands.Devices, cands.Nodes, cands.Available)
+	case cands.Devices > 0:
+		// Physics fits but every matching device is held by another claim:
+		// satisfiable in principle, queued in practice — say so (issue #21;
+		// this exact ambiguity misled a live operator).
+		return "True", "AllDevicesHeld",
+			fmt.Sprintf("%d device(s) satisfy the bounds but 0 are unallocated (e.g. held by %s) — pods will queue until a claim releases",
+				cands.Devices, cands.HeldBy)
+	default:
+		return "False", "NoCandidates", cands.Shortfall
+	}
+}
+
+// conditionReason reads the reason of a condition from the (informer-cached)
+// object's status; "" when absent.
+func conditionReason(mc *unstructured.Unstructured, condType string) string {
+	conds, _, _ := unstructured.NestedSlice(mc.Object, "status", "conditions")
+	for _, cond := range conds {
+		if m, ok := cond.(map[string]any); ok && m["type"] == condType {
+			reason, _ := m["reason"].(string)
+			return reason
+		}
+	}
+	return ""
+}
+
+// resolve memoizes Resolver.Resolve by spec tuple with a TTL. Errors are not
+// cached: retry pacing is the rate limiter's job, and a fixed model DB must
+// take effect on the next attempt.
+func (c *Controller) resolve(ctx context.Context, model string, minTps float64, quant string, efficiency int64) (*Bounds, error) {
+	key := fmt.Sprintf("%s|%s|%s|%d",
+		model, strconv.FormatFloat(minTps, 'f', -1, 64), quant, efficiency)
+	now := time.Now()
+
+	c.resolveMu.Lock()
+	if e, ok := c.resolveCache[key]; ok && now.Before(e.expires) {
+		c.resolveMu.Unlock()
+		observe.ObserveResolve(0, "cached")
+		return e.bounds, nil
+	}
+	c.resolveMu.Unlock()
+
+	start := now
+	bounds, err := c.resolver.Resolve(ctx, model, minTps, quant, efficiency)
+	if err != nil {
+		observe.ObserveResolve(time.Since(start), "error")
+		return nil, err
+	}
+	observe.ObserveResolve(time.Since(start), "ok")
+
+	c.resolveMu.Lock()
+	if len(c.resolveCache) >= 512 {
+		// Cheap bound: churn past the cap is pathological (spec tuples are
+		// few); dropping everything is simpler than an LRU and self-heals.
+		c.resolveCache = map[string]resolveEntry{}
+	}
+	c.resolveCache[key] = resolveEntry{bounds: bounds, expires: now.Add(resolveCacheTTL)}
+	c.resolveMu.Unlock()
+	return bounds, nil
 }
 
 func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string) Candidates {
@@ -286,6 +490,21 @@ func (c *Controller) updateStatus(ctx context.Context, ns, name string, mutate f
 }
 
 func (c *Controller) event(mc *unstructured.Unstructured, kind, reason, message string) {
+	// Suppress consecutive duplicates per object+reason: a persistently
+	// failing resolve retries on a rate-limited backoff, and each retry
+	// would otherwise mint a fresh Event object.
+	dedupKey := mc.GetNamespace() + "/" + mc.GetName() + "/" + reason
+	c.eventMu.Lock()
+	if c.lastEvent[dedupKey] == message {
+		c.eventMu.Unlock()
+		return
+	}
+	c.lastEvent[dedupKey] = message
+	if len(c.lastEvent) > 4096 { // bound memory on pathological churn
+		c.lastEvent = map[string]string{dedupKey: message}
+	}
+	c.eventMu.Unlock()
+
 	// Best-effort Event via the core API (no broadcaster machinery needed
 	// for the handful of events this controller emits).
 	now := metav1.Now()

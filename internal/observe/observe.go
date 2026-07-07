@@ -10,6 +10,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -47,14 +48,140 @@ var (
 
 	prepareTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: subsystem, Name: "prepare_total",
-		Help: "NodePrepareResources results by outcome.",
-	}, []string{"result"})
+		Help: "NodePrepareResources results by outcome and reason (none|no_allocation|device_missing|foreign_only|cdi_write).",
+	}, []string{"result", "reason"})
 
 	unprepareTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: subsystem, Name: "unprepare_total",
 		Help: "NodeUnprepareResources results by outcome.",
 	}, []string{"result"})
+
+	prepareDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: subsystem, Name: "prepare_duration_seconds",
+		Help:    "Wall time of one claim's prepare (CDI spec write included).",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	unprepareDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: subsystem, Name: "unprepare_duration_seconds",
+		Help:    "Wall time of one claim's unprepare.",
+		Buckets: prometheus.DefBuckets,
+	})
+
+	// devices is the published inventory itself — the thing that differs
+	// across a heterogeneous fleet. Reset+set each probe cycle, so a device
+	// disappearing is visible as the series going to 0, and
+	// sum(llmfit_dra_devices{vendor="amd",healthy="true"}) is a fleet fact.
+	devices = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: subsystem, Name: "devices",
+		Help: "Devices in the published inventory by kind/vendor/driver/health.",
+	}, []string{"kind", "vendor", "driver", "healthy"})
+
+	devicesVendorManaged = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: subsystem, Name: "devices_vendor_managed",
+		Help: "Published devices demoted to fitness-only (vendor DRA driver owns allocation, or the kernel driver is unpreparable).",
+	}, []string{"kind", "driver"})
+
+	probeErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: subsystem, Name: "probe_errors_total",
+		Help: "Probe/publish cycle failures by stage (walk|meminfo|detect|coexist).",
+	}, []string{"stage"})
+
+	slicePublishErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: subsystem, Name: "slice_publish_errors_total",
+		Help: "ResourceSlice write failures reported by the helper controller (api|dropped_fields).",
+	}, []string{"kind"})
+
+	hotplugListenerUp = promauto.NewGauge(prometheus.GaugeOpts{
+		Subsystem: subsystem, Name: "hotplug_listener_up",
+		Help: "1 while the uevent listener runs; 0 when probing is ticker-only.",
+	})
+
+	hotplugWakeups = promauto.NewCounter(prometheus.CounterOpts{
+		Subsystem: subsystem, Name: "hotplug_wakeups_total",
+		Help: "Re-probe cycles triggered by kernel uevents (vs the ticker).",
+	})
+
+	cdiOrphansRemoved = promauto.NewCounter(prometheus.CounterOpts{
+		Subsystem: subsystem, Name: "cdi_orphans_removed_total",
+		Help: "Orphaned CDI spec files removed by startup GC.",
+	})
+
+	// Controller-mode metrics (the ModelClaim reconciler).
+	resolveDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Subsystem: subsystem, Name: "resolve_duration_seconds",
+		Help:    "llmfit claim resolve wall time by result (ok|error|cached).",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"result"})
+
+	modelClaimReconciles = promauto.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: subsystem, Name: "modelclaim_reconciles_total",
+		Help: "ModelClaim reconcile outcomes.",
+	}, []string{"result"})
 )
+
+// ObserveResolve records one resolver call ("ok"|"error"|"cached").
+func ObserveResolve(d time.Duration, result string) {
+	resolveDuration.WithLabelValues(result).Observe(d.Seconds())
+}
+
+// ModelClaimReconcile counts one reconcile outcome ("ok"|"error").
+func ModelClaimReconcile(result string) {
+	modelClaimReconciles.WithLabelValues(result).Inc()
+}
+
+// DeviceInfo is the label set SetInventory aggregates. Values must stay
+// bounded: kind and driver come from a small kernel-driver set, vendor from
+// vendorName's enumeration — never device names or PCI addresses.
+type DeviceInfo struct {
+	Kind, Vendor, Driver   string
+	Healthy, VendorManaged bool
+}
+
+// SetInventory replaces the published-inventory gauges with this cycle's
+// devices. Reset first: a stale series for removed hardware would report a
+// device that no longer exists.
+func SetInventory(devs []DeviceInfo) {
+	devices.Reset()
+	devicesVendorManaged.Reset()
+	counts := map[DeviceInfo]int{}
+	vm := map[[2]string]int{}
+	for _, d := range devs {
+		key := DeviceInfo{Kind: d.Kind, Vendor: d.Vendor, Driver: d.Driver, Healthy: d.Healthy}
+		counts[key]++
+		if d.VendorManaged {
+			vm[[2]string{d.Kind, d.Driver}]++
+		}
+	}
+	for k, n := range counts {
+		devices.WithLabelValues(k.Kind, k.Vendor, k.Driver, strconv.FormatBool(k.Healthy)).Set(float64(n))
+	}
+	for k, n := range vm {
+		devicesVendorManaged.WithLabelValues(k[0], k[1]).Set(float64(n))
+	}
+}
+
+// ProbeError counts a failed stage of the probe/publish cycle.
+func ProbeError(stage string) { probeErrors.WithLabelValues(stage).Inc() }
+
+// SlicePublishError counts a ResourceSlice write failure surfaced by the
+// upstream helper's ErrorHandler.
+func SlicePublishError(kind string) { slicePublishErrors.WithLabelValues(kind).Inc() }
+
+// HotplugListener records whether uevent-driven probing is active.
+func HotplugListener(up bool) {
+	if up {
+		hotplugListenerUp.Set(1)
+	} else {
+		hotplugListenerUp.Set(0)
+	}
+}
+
+// HotplugWakeup counts a uevent-triggered re-probe.
+func HotplugWakeup() { hotplugWakeups.Inc() }
+
+// CDIOrphanRemoved counts one orphaned spec removed by startup GC.
+func CDIOrphanRemoved() { cdiOrphansRemoved.Inc() }
 
 // knownSources seeds the gauge so every series exists at 0 before the first
 // probe — dashboards and alerts don't have to special-case a missing label.
@@ -84,9 +211,18 @@ func ObserveProbe(d time.Duration, changed bool) {
 	}
 }
 
-// Prepare/Unprepare record plugin outcomes ("ok" or "error").
-func Prepare(result string)   { prepareTotal.WithLabelValues(result).Inc() }
-func Unprepare(result string) { unprepareTotal.WithLabelValues(result).Inc() }
+// Prepare records one claim's prepare outcome ("ok"/"error"), the error
+// reason ("none" when ok), and its duration.
+func Prepare(result, reason string, d time.Duration) {
+	prepareTotal.WithLabelValues(result, reason).Inc()
+	prepareDuration.Observe(d.Seconds())
+}
+
+// Unprepare records one claim's unprepare outcome and duration.
+func Unprepare(result string, d time.Duration) {
+	unprepareTotal.WithLabelValues(result).Inc()
+	unprepareDuration.Observe(d.Seconds())
+}
 
 // Health tracks liveness (reconcile-loop heartbeat) and readiness (startup
 // complete). It is shared with main's loop and the HTTP handlers.
