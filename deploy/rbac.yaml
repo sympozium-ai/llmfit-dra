@@ -28,24 +28,6 @@ rules:
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceclaims"]
     verbs: ["get", "list"]
-  # ModelClaim controller (--controller mode).
-  - apiGroups: ["llmfit.ai"]
-    resources: ["modelclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["llmfit.ai"]
-    resources: ["modelclaims/status"]
-    verbs: ["get", "update", "patch"]
-  - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaimtemplates"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Availability in the Satisfiable condition: watch which devices are held
-  # by allocated claims (issue #21).
-  - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaims"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -58,4 +40,53 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: llmfit-dra
+    namespace: llmfit-dra
+---
+# ModelClaim controller (--controller mode) — its own identity: the
+# cluster-wide template/status write powers must not ride along on every
+# node's DaemonSet ServiceAccount. Mirrors the chart's split
+# (charts/llmfit-dra/templates/rbac.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llmfit-dra-modelclaim
+  namespace: llmfit-dra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: llmfit-dra-modelclaim
+rules:
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["llmfit.ai"]
+    resources: ["modelclaims/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaimtemplates"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Satisfiable condition inputs: published devices, and which are held by
+  # allocated claims (issue #21).
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llmfit-dra-modelclaim
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llmfit-dra-modelclaim
+subjects:
+  - kind: ServiceAccount
+    name: llmfit-dra-modelclaim
     namespace: llmfit-dra

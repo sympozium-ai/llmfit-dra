@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 // Kind classifies a detected device.
@@ -56,6 +58,11 @@ type Device struct {
 	// RASUncorrectable is the device's uncorrectable memory error count
 	// (amdgpu RAS ue_count; 0 where the driver doesn't expose it).
 	RASUncorrectable uint64
+
+	// UniqueID is amdgpu's stable GPU identifier (sysfs unique_id) where the
+	// ASIC exposes one; the kubelet plugin uses it for ROCR_VISIBLE_DEVICES
+	// isolation on multi-GPU AMD nodes. Empty on APUs/ASICs without it.
+	UniqueID string
 }
 
 // Healthy reports whether the device is usable, with a machine-readable
@@ -169,6 +176,7 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 			PCIDevice: readHexID(filepath.Join(devDir, "device")),
 			Driver:    readLinkBase(filepath.Join(devDir, "driver")),
 			VRAMBytes: vramBytes(classDir, e.Name()),
+			UniqueID:  readTrimmed(filepath.Join(devDir, "unique_id")),
 
 			RASUncorrectable: readUint(filepath.Join(devDir, "ras", "ue_count")),
 		}
@@ -177,6 +185,13 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 		case KindGPU:
 			d.DevNode = "/dev/dri/" + e.Name()
 			d.RenderNode = renderNode(devDir)
+			if d.VRAMBytes == 0 {
+				// "0 VRAM" is deliberately ambiguous (unified iGPU vs a
+				// driver with no sysfs VRAM file) — say so per device, or a
+				// capacity-less published GPU is undebuggable from logs.
+				klog.V(2).InfoS("no VRAM sysfs path readable; unknown here (unified iGPU or driver without sysfs VRAM)",
+					"device", e.Name(), "driver", d.Driver)
+			}
 		case KindNPU:
 			d.DevNode = "/dev/accel/" + e.Name()
 		}
@@ -249,6 +264,14 @@ func readHexID(path string) string {
 		return ""
 	}
 	return strings.TrimPrefix(strings.TrimSpace(string(b)), "0x")
+}
+
+func readTrimmed(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func readLinkBase(path string) string {

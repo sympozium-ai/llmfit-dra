@@ -18,6 +18,10 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "llmfit-dra.controllerServiceAccountName" -}}
+{{- include "llmfit-dra.serviceAccountName" . -}}-modelclaim
+{{- end -}}
+
 {{- define "llmfit-dra.labels" -}}
 app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

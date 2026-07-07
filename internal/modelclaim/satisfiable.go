@@ -66,6 +66,22 @@ func kindForClass(deviceClassName string) string {
 func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]string, b *Bounds, deviceClassName string) Candidates {
 	wantKind := kindForClass(deviceClassName)
 	memFloor := int64(b.MemoryGi) * 1024 * 1024 * 1024
+	// Mirrors FitCEL: the CPU class waives the bandwidth floor (CPU devices
+	// publish none; naming the class is an explicit CPU opt-in).
+	bwRequired := deviceClassName != "cpu."+DriverDomain
+
+	// DRA contract: only slices from a pool's highest generation are current.
+	// During a pool update the informer transiently holds old+new slices for
+	// the same pool — counting both double-counts every device.
+	maxGen := map[string]int64{}
+	for _, slice := range slices {
+		if slice.Spec.Driver != DriverDomain {
+			continue
+		}
+		if g := slice.Spec.Pool.Generation; g > maxGen[slice.Spec.Pool.Name] {
+			maxGen[slice.Spec.Pool.Name] = g
+		}
+	}
 
 	nodes := map[string]bool{}
 	devices := 0
@@ -77,6 +93,9 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 	for _, slice := range slices {
 		if slice.Spec.Driver != DriverDomain {
 			continue
+		}
+		if slice.Spec.Pool.Generation < maxGen[slice.Spec.Pool.Name] {
+			continue // superseded by a newer generation of the same pool
 		}
 		node := ""
 		if slice.Spec.NodeName != nil {
@@ -107,6 +126,9 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 			if a, ok := attrs["memoryBandwidthGBs"]; ok && a.IntValue != nil {
 				bw = *a.IntValue
 				bwOK = bw >= int64(b.MinBandwidthGBs)
+			}
+			if !bwRequired {
+				bwOK = true
 			}
 			if h, ok := attrs["healthy"]; ok && h.BoolValue != nil {
 				healthyOK = *h.BoolValue

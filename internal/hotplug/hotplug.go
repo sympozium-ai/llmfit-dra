@@ -154,8 +154,11 @@ func Listen(ctx context.Context, debounce time.Duration) (<-chan struct{}, error
 	}()
 	// Trailing-edge debounce: a burst (one hotplug = many uevents) produces
 	// ONE signal after the burst settles, so the re-probe sees the final
-	// state instead of a half-initialized device.
+	// state instead of a half-initialized device. Closing events on exit is
+	// the caller's only signal that hotplug died mid-run (fatal read error)
+	// and probing degraded to ticker-only.
 	go func() {
+		defer close(events)
 		for ev := range raw {
 			klog.V(2).InfoS("accelerator uevent", "action", ev.action, "subsystem", ev.subsystem)
 			timer := time.NewTimer(debounce)

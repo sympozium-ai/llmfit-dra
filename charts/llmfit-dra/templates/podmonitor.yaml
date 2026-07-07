@@ -1,0 +1,22 @@
+{{- if .Values.metrics.podMonitor.enabled }}
+# PodMonitor for prometheus-operator: one selector covers both the DaemonSet
+# (hostNetwork; scraped at nodeIP:metricsPort) and the ModelClaim controller
+# Deployment — both label their metrics port "metrics".
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "llmfit-dra.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llmfit-dra.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+{{- end }}

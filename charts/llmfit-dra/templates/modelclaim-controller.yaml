@@ -14,6 +14,10 @@ metadata:
     app.kubernetes.io/component: modelclaim-controller
 spec:
   replicas: 1
+  # No leader election yet: Recreate prevents the rolling-update window where
+  # two controllers race the non-idempotent template delete-then-recreate.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
@@ -25,8 +29,16 @@ spec:
         app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: modelclaim-controller
+      {{- if .Values.metrics.annotations }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metricsPort | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
     spec:
-      serviceAccountName: {{ include "llmfit-dra.serviceAccountName" . }}
+      # Its own SA: the controller's cluster-wide template/status write powers
+      # must not ride along on every node's DaemonSet identity.
+      serviceAccountName: {{ include "llmfit-dra.controllerServiceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- range . }}
@@ -44,6 +56,18 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --controller
+            - --metrics-addr=:{{ .Values.metricsPort }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metricsPort }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 2
+            periodSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

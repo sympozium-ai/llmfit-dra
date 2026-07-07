@@ -22,6 +22,12 @@ spec:
     metadata:
       labels:
         {{- include "llmfit-dra.labels" . | nindent 8 }}
+      {{- if .Values.metrics.annotations }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metricsPort | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
     spec:
       serviceAccountName: {{ include "llmfit-dra.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}

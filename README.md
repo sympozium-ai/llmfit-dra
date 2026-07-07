@@ -154,9 +154,17 @@ which); identity comes from sysfs. Inventory updates are event-driven
 
 ## Configuration
 
-The driver serves Prometheus metrics and health on `nodeIP:9099`
-(`/metrics`, `/healthz`, `/readyz`) — `capability_source`, degraded-cycle,
-probe-latency, and prepare/unprepare counters.
+Both components serve Prometheus metrics and health (`/metrics`, `/healthz`,
+`/readyz`): the node agent on `nodeIP:9099`, the ModelClaim controller on its
+pod port. Headliners: `llmfit_dra_devices{kind,vendor,driver,healthy}` (the
+published inventory itself — one query answers "what does the fleet look
+like"), `capability_source`, `slice_publish_errors_total`,
+`prepare_total{result,reason}`, and `resolve_duration_seconds`. Scrape
+discovery is `prometheus.io/*` annotations by default; set
+`metrics.podMonitor.enabled=true` for prometheus-operator. See
+`docs/ARCHITECTURE.md` § Observability for the full inventory and
+operational caveats (uninstall cleanup, non-root device permissions,
+NVIDIA `nvidia_drm` requirement).
 
 Everything is a Helm value: `image.*`, `metricsPort`, `probeInterval`, `kubeletPlugin`
 (false = publish-only inventory), `vendorDrivers` (coexistence list),

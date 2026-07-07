@@ -75,6 +75,13 @@ func writeSpec(dir, claimUID string, devices []cdiDevice) error {
 		tmp.Close()
 		return err
 	}
+	// fsync before rename: without it a node power loss can leave the
+	// renamed spec empty or torn, and the runtime then fails every container
+	// start against this claim until the file is rewritten.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

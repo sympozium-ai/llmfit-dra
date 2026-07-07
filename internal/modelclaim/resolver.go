@@ -39,6 +39,11 @@ type ExecResolver struct {
 }
 
 func (r *ExecResolver) Resolve(ctx context.Context, model string, minTps float64, quant string, efficiencyPct int64) (*Bounds, error) {
+	// The controller validates spec.model before calling; this is defense in
+	// depth so no caller can ever turn the positional into an llmfit flag.
+	if model == "" || model[0] == '-' {
+		return nil, fmt.Errorf("invalid model reference %q", model)
+	}
 	timeout := r.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +59,20 @@ func (inv *Inventory) lookup(name string) (probe.Device, bool) {
 	defer inv.mu.RUnlock()
 	d, ok := inv.devices[name]
 	return d, ok
+}
+
+// driverCount reports how many devices are bound to the given kernel driver
+// — Prepare uses it to decide whether ROCm visibility isolation is needed.
+func (inv *Inventory) driverCount(driver string) int {
+	inv.mu.RLock()
+	defer inv.mu.RUnlock()
+	n := 0
+	for _, d := range inv.devices {
+		if d.Driver == driver {
+			n++
+		}
+	}
+	return n
 }
 
 // Plugin implements kubeletplugin.DRAPlugin.
@@ -104,23 +119,32 @@ func Start(ctx context.Context, client kubernetes.Interface, nodeName, podUID st
 func (p *Plugin) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
 	results := make(map[types.UID]kubeletplugin.PrepareResult, len(claims))
 	for _, claim := range claims {
-		res := p.prepareClaim(ctx, claim)
+		start := time.Now()
+		res, reason := p.prepareClaim(ctx, claim)
 		if res.Err != nil {
-			observe.Prepare("error")
+			observe.Prepare("error", reason, time.Since(start))
 		} else {
-			observe.Prepare("ok")
+			observe.Prepare("ok", "none", time.Since(start))
 		}
 		results[claim.UID] = res
 	}
 	return results, nil
 }
 
-func (p *Plugin) prepareClaim(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+// prepareClaim returns the result plus a bounded reason label for metrics:
+// no_allocation | device_missing | foreign_only | cdi_write | none.
+func (p *Plugin) prepareClaim(ctx context.Context, claim *resourceapi.ResourceClaim) (kubeletplugin.PrepareResult, string) {
 	if claim.Status.Allocation == nil {
-		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has no allocation", claim.Namespace, claim.Name)}
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has no allocation", claim.Namespace, claim.Name)}, "no_allocation"
 	}
 	var prepared []kubeletplugin.Device
 	var cdiDevices []cdiDevice
+	var amdgpu []int       // indices into cdiDevices
+	var amdgpuIDs []string // matching sysfs unique_id values ("" when absent)
+	// Node-global paths (/dev/kfd) appear in every amdgpu device's edits;
+	// injected once per claim — some runtimes reject duplicate device nodes
+	// in the merged OCI spec.
+	seenNodes := map[string]bool{}
 	for _, alloc := range claim.Status.Allocation.Devices.Results {
 		if alloc.Driver != publisher.DriverName {
 			continue // another driver's result in a mixed claim (Phase 3 territory)
@@ -129,10 +153,23 @@ func (p *Plugin) prepareClaim(ctx context.Context, claim *resourceapi.ResourceCl
 		if !ok {
 			// Allocation references a device the current probe doesn't see —
 			// hardware went away between scheduling and prepare.
-			return kubeletplugin.PrepareResult{Err: fmt.Errorf("allocated device %q not in current inventory", alloc.Device)}
+			return kubeletplugin.PrepareResult{Err: fmt.Errorf("allocated device %q not in current inventory", alloc.Device)}, "device_missing"
 		}
 		name := string(claim.UID) + "-" + alloc.Device
-		cdiDevices = append(cdiDevices, cdiDevice{Name: name, ContainerEdits: editsFor(dev)})
+		edits := editsFor(dev)
+		deduped := edits.DeviceNodes[:0]
+		for _, n := range edits.DeviceNodes {
+			if !seenNodes[n.Path] {
+				seenNodes[n.Path] = true
+				deduped = append(deduped, n)
+			}
+		}
+		edits.DeviceNodes = deduped
+		cdiDevices = append(cdiDevices, cdiDevice{Name: name, ContainerEdits: edits})
+		if dev.Driver == "amdgpu" {
+			amdgpu = append(amdgpu, len(cdiDevices)-1)
+			amdgpuIDs = append(amdgpuIDs, dev.UniqueID)
+		}
 		prepared = append(prepared, kubeletplugin.Device{
 			Requests:     []string{alloc.Request},
 			PoolName:     alloc.Pool,
@@ -140,14 +177,43 @@ func (p *Plugin) prepareClaim(ctx context.Context, claim *resourceapi.ResourceCl
 			CDIDeviceIDs: []string{qualifiedName(name)},
 		})
 	}
+	p.addROCmVisibility(ctx, claim, cdiDevices, amdgpu, amdgpuIDs)
 	if len(prepared) == 0 {
-		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has no %s allocation results", claim.Namespace, claim.Name, publisher.DriverName)}
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("claim %s/%s has no %s allocation results", claim.Namespace, claim.Name, publisher.DriverName)}, "foreign_only"
 	}
 	if err := writeSpec(p.cdiDir, string(claim.UID), cdiDevices); err != nil {
-		return kubeletplugin.PrepareResult{Err: fmt.Errorf("writing CDI spec: %w", err)}
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("writing CDI spec: %w", err)}, "cdi_write"
 	}
 	klog.FromContext(ctx).V(2).Info("prepared claim", "claim", klog.KObj(claim), "devices", len(prepared))
-	return kubeletplugin.PrepareResult{Devices: prepared}
+	return kubeletplugin.PrepareResult{Devices: prepared}, "none"
+}
+
+// addROCmVisibility scopes ROCm compute to the claim's own GPUs. /dev/kfd is
+// node-global: on a multi-GPU AMD node, injecting it lets KFD enumerate every
+// AMD GPU while only the allocated render nodes are present — an isolation
+// leak, and some ROCm versions abort when they can enumerate a GPU whose
+// render node they cannot open. ROCR_VISIBLE_DEVICES=<GPU-uuid,…> closes it.
+//
+// Deliberately conservative: single-amdgpu nodes need no isolation and get no
+// env (a wrong value would break the working happy path), and nodes whose
+// ASICs expose no unique_id (common on APUs) log the gap instead of guessing.
+// The identical joined value goes on EVERY amdgpu device's edits, so the
+// runtime's env merge is order-independent.
+func (p *Plugin) addROCmVisibility(ctx context.Context, claim *resourceapi.ResourceClaim, cdiDevices []cdiDevice, amdgpu []int, ids []string) {
+	if len(amdgpu) == 0 || p.inv.driverCount("amdgpu") <= 1 {
+		return
+	}
+	for _, id := range ids {
+		if id == "" {
+			klog.FromContext(ctx).V(2).Info("multi-GPU amdgpu node without sysfs unique_id; skipping ROCR_VISIBLE_DEVICES isolation",
+				"claim", klog.KObj(claim))
+			return
+		}
+	}
+	env := "ROCR_VISIBLE_DEVICES=GPU-" + strings.Join(ids, ",GPU-")
+	for _, i := range amdgpu {
+		cdiDevices[i].ContainerEdits.Env = append(cdiDevices[i].ContainerEdits.Env, env)
+	}
 }
 
 // editsFor maps a probed device to its container edits: every /dev node the
@@ -230,6 +296,7 @@ func gcOrphanedSpecs(ctx context.Context, client kubernetes.Interface, cdiDir st
 			klog.FromContext(ctx).Error(err, "removing orphaned CDI spec", "uid", uid)
 			continue
 		}
+		observe.CDIOrphanRemoved()
 		klog.FromContext(ctx).Info("removed orphaned CDI spec", "uid", uid)
 	}
 	return nil
@@ -241,11 +308,12 @@ func gcOrphanedSpecs(ctx context.Context, client kubernetes.Interface, cdiDir st
 func (p *Plugin) UnprepareResourceClaims(ctx context.Context, claims []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	results := make(map[types.UID]error, len(claims))
 	for _, claim := range claims {
+		start := time.Now()
 		err := removeSpec(p.cdiDir, string(claim.UID))
 		if err != nil {
-			observe.Unprepare("error")
+			observe.Unprepare("error", time.Since(start))
 		} else {
-			observe.Unprepare("ok")
+			observe.Unprepare("ok", time.Since(start))
 		}
 		results[claim.UID] = err
 	}
