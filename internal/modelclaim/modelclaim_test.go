@@ -10,8 +10,9 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
+
+	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
 )
 
 func testBounds() *Bounds {
@@ -64,14 +65,18 @@ func TestFitCELCPUClassWaivesBandwidth(t *testing.T) {
 	}
 }
 
-func testMC() *unstructured.Unstructured {
-	mc := &unstructured.Unstructured{}
-	mc.SetAPIVersion("llmfit.ai/v1alpha1")
-	mc.SetKind("ModelClaim")
-	mc.SetName("qwen36")
-	mc.SetNamespace("team-a")
-	mc.SetUID("uid-1")
-	return mc
+func testMC() *apiv1alpha1.ModelClaim {
+	return &apiv1alpha1.ModelClaim{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: apiv1alpha1.GroupVersion.String(),
+			Kind:       apiv1alpha1.ModelClaimKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qwen36",
+			Namespace: "team-a",
+			UID:       "uid-1",
+		},
+	}
 }
 
 func TestBuildTemplateShape(t *testing.T) {

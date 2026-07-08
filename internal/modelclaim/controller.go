@@ -10,8 +10,10 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
@@ -21,16 +23,28 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
 	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 )
 
 // GVR of the ModelClaim custom resource.
-var GVR = schema.GroupVersionResource{Group: "llmfit.ai", Version: "v1alpha1", Resource: "modelclaims"}
+var GVR = schema.GroupVersionResource{Group: apiv1alpha1.GroupName, Version: apiv1alpha1.GroupVersion.Version, Resource: "modelclaims"}
 
 const (
-	condResolved    = "Resolved"
-	condSatisfiable = "Satisfiable"
+	condResolved    = apiv1alpha1.ConditionResolved
+	condSatisfiable = apiv1alpha1.ConditionSatisfiable
 )
+
+// fromUnstructured decodes a dynamic-client/informer object into the typed
+// API. The CRD schema has already validated the document, so a failure here
+// is a driver bug, not user input — callers surface it and requeue.
+func fromUnstructured(u *unstructured.Unstructured) (*apiv1alpha1.ModelClaim, error) {
+	mc := &apiv1alpha1.ModelClaim{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, mc); err != nil {
+		return nil, fmt.Errorf("decoding ModelClaim: %w", err)
+	}
+	return mc, nil
+}
 
 // modelRefPattern admits catalog names and HuggingFace-style org/name repo
 // ids. First character alphanumeric, so a value can never read as a CLI flag
@@ -247,18 +261,29 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	if err != nil || !exists {
 		return err // deleted: ownerRef GC removes the template
 	}
-	mc := obj.(*unstructured.Unstructured).DeepCopy()
+	mc, err := fromUnstructured(obj.(*unstructured.Unstructured))
+	if err != nil {
+		return err
+	}
 
-	spec, _, _ := unstructured.NestedMap(mc.Object, "spec")
-	model, _ := spec["model"].(string)
-	minTps := numOr(spec["minTps"], 20)
-	quant, _ := spec["quant"].(string)
-	efficiency := int64(numOr(spec["efficiencyPct"], 0))
-	deviceClass, _ := spec["deviceClassName"].(string)
+	model := mc.Spec.Model
+	// The API server defaults minTps/efficiencyPct/deviceClassName from the
+	// CRD schema; the fallbacks below only cover objects persisted before the
+	// defaults existed.
+	minTps := 20.0
+	if mc.Spec.MinTps != nil {
+		minTps = *mc.Spec.MinTps
+	}
+	quant := mc.Spec.Quant
+	var efficiency int64
+	if mc.Spec.EfficiencyPct != nil {
+		efficiency = int64(*mc.Spec.EfficiencyPct)
+	}
+	deviceClass := mc.Spec.DeviceClassName
 	if deviceClass == "" {
 		deviceClass = DriverDomain
 	}
-	extraSelectors := strSlice(spec["extraSelectors"])
+	extraSelectors := mc.Spec.ExtraSelectors
 
 	// ── Validate ───────────────────────────────────────────────────────
 	// The model reaches the llmfit binary as an argv token: reject anything
@@ -266,10 +291,10 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	// never be parsed as a flag. Terminal until the spec changes — no requeue.
 	if !modelRefPattern.MatchString(model) {
 		msg := fmt.Sprintf("spec.model %q is not a valid model reference (want org/name or name, e.g. Qwen/Qwen3.6-30B-A3B)", model)
-		c.event(mc, "Warning", "InvalidModel", msg)
-		return c.updateStatus(ctx, ns, name, func(status map[string]any) {
-			setCondition(status, mc.GetGeneration(), condResolved, "False", "InvalidModel", msg)
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "InvalidModel", "model not resolved")
+		c.event(mc, "Warning", apiv1alpha1.ReasonInvalidModel, msg)
+		return c.updateStatus(ctx, ns, name, func(status *apiv1alpha1.ModelClaimStatus) {
+			setCondition(status, mc.Generation, condResolved, metav1.ConditionFalse, apiv1alpha1.ReasonInvalidModel, msg)
+			setCondition(status, mc.Generation, condSatisfiable, metav1.ConditionUnknown, apiv1alpha1.ReasonInvalidModel, "model not resolved")
 		})
 	}
 
@@ -283,10 +308,10 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		// Resolved. The returned error requeues with backoff, so a transient
 		// failure on a NEW ModelClaim doesn't strand it template-less until
 		// the next resync.
-		c.event(mc, "Warning", "ResolveFailed", resolveErr.Error())
-		if err := c.updateStatus(ctx, ns, name, func(status map[string]any) {
-			setCondition(status, mc.GetGeneration(), condResolved, "False", "ResolveFailed", resolveErr.Error())
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "ResolveFailed", "bounds unavailable while resolve fails")
+		c.event(mc, "Warning", apiv1alpha1.ReasonResolveFailed, resolveErr.Error())
+		if err := c.updateStatus(ctx, ns, name, func(status *apiv1alpha1.ModelClaimStatus) {
+			setCondition(status, mc.Generation, condResolved, metav1.ConditionFalse, apiv1alpha1.ReasonResolveFailed, resolveErr.Error())
+			setCondition(status, mc.Generation, condSatisfiable, metav1.ConditionUnknown, apiv1alpha1.ReasonResolveFailed, "bounds unavailable while resolve fails")
 		}); err != nil {
 			return err
 		}
@@ -312,10 +337,10 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		// and above all never delete-recreate it. Terminal until the user
 		// renames one of the two — say so instead of clobbering.
 		msg := fmt.Sprintf("a ResourceClaimTemplate named %q already exists and is not managed by this ModelClaim; rename the ModelClaim or delete the template", name)
-		c.event(mc, "Warning", "TemplateConflict", msg)
-		return c.updateStatus(ctx, ns, name, func(status map[string]any) {
-			setCondition(status, mc.GetGeneration(), condResolved, "False", "TemplateConflict", msg)
-			setCondition(status, mc.GetGeneration(), condSatisfiable, "Unknown", "TemplateConflict", "template not managed by this ModelClaim")
+		c.event(mc, "Warning", apiv1alpha1.ReasonTemplateConflict, msg)
+		return c.updateStatus(ctx, ns, name, func(status *apiv1alpha1.ModelClaimStatus) {
+			setCondition(status, mc.Generation, condResolved, metav1.ConditionFalse, apiv1alpha1.ReasonTemplateConflict, msg)
+			setCondition(status, mc.Generation, condSatisfiable, metav1.ConditionUnknown, apiv1alpha1.ReasonTemplateConflict, "template not managed by this ModelClaim")
 		})
 	case TemplateNeedsUpdate(live, desired):
 		updated := live.DeepCopy()
@@ -354,63 +379,59 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	// reconcile.
 	if prev := conditionReason(mc, condSatisfiable); prev != satReason {
 		kind := "Normal"
-		if satStatus == "False" {
+		if satStatus == metav1.ConditionFalse {
 			kind = "Warning"
 		}
 		c.event(mc, kind, satReason, satMsg)
 	}
 
-	return c.updateStatus(ctx, ns, name, func(status map[string]any) {
-		status["observedGeneration"] = mc.GetGeneration()
-		status["resolved"] = map[string]any{
-			"memoryGi":        int64(bounds.MemoryGi),
-			"minBandwidthGBs": int64(bounds.MinBandwidthGBs),
-			"quant":           bounds.Quant,
-			"weightsGb":       strconv.FormatFloat(bounds.WeightsGb, 'f', 1, 64),
-			"resolverVersion": bounds.ResolverVersion,
+	return c.updateStatus(ctx, ns, name, func(status *apiv1alpha1.ModelClaimStatus) {
+		status.ObservedGeneration = mc.Generation
+		status.Resolved = &apiv1alpha1.ResolvedPhysics{
+			MemoryGi:        int64(bounds.MemoryGi),
+			MinBandwidthGBs: int64(bounds.MinBandwidthGBs),
+			Quant:           bounds.Quant,
+			WeightsGb:       strconv.FormatFloat(bounds.WeightsGb, 'f', 1, 64),
+			ResolverVersion: bounds.ResolverVersion,
 		}
-		status["templateRef"] = map[string]any{"name": name}
-		status["candidates"] = map[string]any{
-			"devices":   int64(cands.Devices),
-			"nodes":     int64(cands.Nodes),
-			"available": int64(cands.Available),
+		status.TemplateRef = &apiv1alpha1.TemplateRef{Name: name}
+		status.Candidates = &apiv1alpha1.Candidates{
+			Devices:   int64(cands.Devices),
+			Nodes:     int64(cands.Nodes),
+			Available: int64(cands.Available),
 		}
-		setCondition(status, mc.GetGeneration(), condResolved, "True", "Resolved",
+		setCondition(status, mc.Generation, condResolved, metav1.ConditionTrue, apiv1alpha1.ReasonResolved,
 			fmt.Sprintf("%s @ %s: memory>=%dGi, bandwidth>=%dGB/s",
 				bounds.Model, bounds.Quant, bounds.MemoryGi, bounds.MinBandwidthGBs))
-		setCondition(status, mc.GetGeneration(), condSatisfiable, satStatus, satReason, satMsg)
+		setCondition(status, mc.Generation, condSatisfiable, satStatus, satReason, satMsg)
 	})
 }
 
 // satisfiableCondition maps a candidates snapshot to the Satisfiable
 // condition tuple.
-func satisfiableCondition(cands Candidates) (status, reason, message string) {
+func satisfiableCondition(cands Candidates) (status metav1.ConditionStatus, reason, message string) {
 	switch {
 	case cands.Devices > 0 && cands.Available > 0:
-		return "True", "DevicesAvailable",
+		return metav1.ConditionTrue, apiv1alpha1.ReasonDevicesAvailable,
 			fmt.Sprintf("%d device(s) on %d node(s) satisfy the bounds (%d currently unallocated)",
 				cands.Devices, cands.Nodes, cands.Available)
 	case cands.Devices > 0:
 		// Physics fits but every matching device is held by another claim:
 		// satisfiable in principle, queued in practice — say so (issue #21;
 		// this exact ambiguity misled a live operator).
-		return "True", "AllDevicesHeld",
+		return metav1.ConditionTrue, apiv1alpha1.ReasonAllDevicesHeld,
 			fmt.Sprintf("%d device(s) satisfy the bounds but 0 are unallocated (e.g. held by %s) — pods will queue until a claim releases",
 				cands.Devices, cands.HeldBy)
 	default:
-		return "False", "NoCandidates", cands.Shortfall
+		return metav1.ConditionFalse, apiv1alpha1.ReasonNoCandidates, cands.Shortfall
 	}
 }
 
 // conditionReason reads the reason of a condition from the (informer-cached)
 // object's status; "" when absent.
-func conditionReason(mc *unstructured.Unstructured, condType string) string {
-	conds, _, _ := unstructured.NestedSlice(mc.Object, "status", "conditions")
-	for _, cond := range conds {
-		if m, ok := cond.(map[string]any); ok && m["type"] == condType {
-			reason, _ := m["reason"].(string)
-			return reason
-		}
+func conditionReason(mc *apiv1alpha1.ModelClaim, condType string) string {
+	if cond := apimeta.FindStatusCondition(mc.Status.Conditions, condType); cond != nil {
+		return cond.Reason
 	}
 	return ""
 }
@@ -468,7 +489,7 @@ func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string) Candidate
 
 // updateStatus mutates .status via the status subresource with a fresh GET
 // (informer cache may be stale right after our own writes).
-func (c *Controller) updateStatus(ctx context.Context, ns, name string, mutate func(map[string]any)) error {
+func (c *Controller) updateStatus(ctx context.Context, ns, name string, mutate func(*apiv1alpha1.ModelClaimStatus)) error {
 	fresh, err := c.dyn.Resource(GVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -476,20 +497,23 @@ func (c *Controller) updateStatus(ctx context.Context, ns, name string, mutate f
 		}
 		return err
 	}
-	status, _, _ := unstructured.NestedMap(fresh.Object, "status")
-	if status == nil {
-		status = map[string]any{}
+	mc, err := fromUnstructured(fresh)
+	if err != nil {
+		return err
 	}
-	mutate(status)
-	_ = unstructured.SetNestedMap(fresh.Object, status, "status")
-	_, err = c.dyn.Resource(GVR).Namespace(ns).UpdateStatus(ctx, fresh, metav1.UpdateOptions{})
+	mutate(&mc.Status)
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mc)
+	if err != nil {
+		return fmt.Errorf("encoding ModelClaim: %w", err)
+	}
+	_, err = c.dyn.Resource(GVR).Namespace(ns).UpdateStatus(ctx, &unstructured.Unstructured{Object: obj}, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) {
 		return nil // requeued by the informer's next event
 	}
 	return err
 }
 
-func (c *Controller) event(mc *unstructured.Unstructured, kind, reason, message string) {
+func (c *Controller) event(mc *apiv1alpha1.ModelClaim, kind, reason, message string) {
 	// Suppress consecutive duplicates per object+reason: a persistently
 	// failing resolve retries on a rate-limited backoff, and each retry
 	// would otherwise mint a fresh Event object.
@@ -515,50 +539,14 @@ func (c *Controller) event(mc *unstructured.Unstructured, kind, reason, message 
 	}
 }
 
-// setCondition upserts a metav1.Condition-shaped entry, preserving
-// lastTransitionTime when status is unchanged.
-func setCondition(status map[string]any, generation int64, condType, condStatus, reason, message string) {
-	conds, _ := status["conditions"].([]any)
-	now := time.Now().UTC().Format(time.RFC3339)
-	newCond := map[string]any{
-		"type":               condType,
-		"status":             condStatus,
-		"reason":             reason,
-		"message":            message,
-		"observedGeneration": generation,
-		"lastTransitionTime": now,
-	}
-	for i, c := range conds {
-		if m, ok := c.(map[string]any); ok && m["type"] == condType {
-			if m["status"] == condStatus {
-				newCond["lastTransitionTime"] = m["lastTransitionTime"]
-			}
-			conds[i] = newCond
-			status["conditions"] = conds
-			return
-		}
-	}
-	status["conditions"] = append(conds, any(newCond))
-}
-
-func numOr(v any, def float64) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int64:
-		return float64(n)
-	default:
-		return def
-	}
-}
-
-func strSlice(v any) []string {
-	items, _ := v.([]any)
-	out := make([]string, 0, len(items))
-	for _, it := range items {
-		if s, ok := it.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
+// setCondition upserts a condition, preserving lastTransitionTime when
+// status is unchanged (apimeta.SetStatusCondition semantics).
+func setCondition(status *apiv1alpha1.ModelClaimStatus, generation int64, condType string, condStatus metav1.ConditionStatus, reason, message string) {
+	apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:               condType,
+		Status:             condStatus,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: generation,
+	})
 }

@@ -6,8 +6,9 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
+
+	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
 )
 
 const (
@@ -53,7 +54,7 @@ func FitCEL(b *Bounds, deviceClassName string) string {
 // same name/namespace, owned by the claim (GC), one device request whose
 // selectors are the generated fit CEL ANDed with any extraSelectors (DRA
 // ANDs all selectors on a request).
-func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
+func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
 	selectors := []resourceapi.DeviceSelector{{
 		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b, deviceClassName)},
 	}}
@@ -66,19 +67,21 @@ func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName str
 	}
 	return &resourceapi.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      mc.GetName(),
-			Namespace: mc.GetNamespace(),
-			Labels:    map[string]string{ManagedByLabel: labelValue(mc.GetName())},
+			Name:      mc.Name,
+			Namespace: mc.Namespace,
+			Labels:    map[string]string{ManagedByLabel: labelValue(mc.Name)},
 			Annotations: map[string]string{
 				"llmfit.ai/model":            b.Model,
 				"llmfit.ai/quant":            b.Quant,
 				"llmfit.ai/resolver-version": b.ResolverVersion,
 			},
+			// APIVersion/Kind from package constants, not mc.TypeMeta — typed
+			// objects legitimately carry an empty TypeMeta.
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         mc.GetAPIVersion(),
-				Kind:               mc.GetKind(),
-				Name:               mc.GetName(),
-				UID:                mc.GetUID(),
+				APIVersion:         apiv1alpha1.GroupVersion.String(),
+				Kind:               apiv1alpha1.ModelClaimKind,
+				Name:               mc.Name,
+				UID:                mc.UID,
 				Controller:         ptr.To(true),
 				BlockOwnerDeletion: ptr.To(true),
 			}},
