@@ -1,17 +1,19 @@
-{{- if .Values.modelClaimController.enabled }}
-# ModelClaim controller: reconciles ModelClaims (llmfit.ai/v1alpha1) into
-# same-named ResourceClaimTemplates (docs/design/modelclaim.md). A plain
-# Deployment — cluster-scoped reconciliation with NONE of the DaemonSet's
-# host privileges. If it's down, existing templates keep stamping per-pod
-# claims; only new/edited ModelClaims wait.
+{{- if .Values.controller.enabled }}
+# The cluster controller (vs the per-node DaemonSet): reconciles ModelClaims
+# (llmfit.ai/v1alpha1) into same-named ResourceClaimTemplates
+# (docs/design/modelclaim.md). A plain Deployment — cluster-scoped
+# reconciliation with NONE of the DaemonSet's host privileges, and stateless
+# by design (all durable state lives in the API server). If it's down,
+# existing templates keep stamping per-pod claims; only new/edited
+# ModelClaims wait.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  name: {{ include "llmfit-dra.fullname" . }}-controller
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llmfit-dra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: modelclaim-controller
+    app.kubernetes.io/component: controller
 spec:
   replicas: 1
   # No leader election yet: Recreate prevents the rolling-update window where
@@ -20,15 +22,15 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
+      app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-controller
       app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: modelclaim-controller
+      app.kubernetes.io/component: controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-modelclaim
+        app.kubernetes.io/name: {{ include "llmfit-dra.name" . }}-controller
         app.kubernetes.io/instance: {{ .Release.Name }}
-        app.kubernetes.io/component: modelclaim-controller
+        app.kubernetes.io/component: controller
       {{- if .Values.metrics.annotations }}
       annotations:
         prometheus.io/scrape: "true"
@@ -51,7 +53,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: modelclaim-controller
+        - name: controller
           image: {{ include "llmfit-dra.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
@@ -74,5 +76,5 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            {{- toYaml .Values.modelClaimController.resources | nindent 12 }}
+            {{- toYaml .Values.controller.resources | nindent 12 }}
 {{- end }}

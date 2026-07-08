@@ -714,7 +714,7 @@ echo "== Scenario 16: ModelClaim — 'run <model>' as a Kubernetes object"
 # INCLUDING the refusal path, no GPU required. On fit-capable GPU nodes it
 # additionally proves template -> pod Running.
 if kubectl get crd modelclaims.llmfit.ai >/dev/null 2>&1 \
-   && kubectl -n "$NS" get deploy -l app.kubernetes.io/component=modelclaim-controller -o name 2>/dev/null | grep -q .; then
+   && kubectl -n "$NS" get deploy -l app.kubernetes.io/component=controller -o name 2>/dev/null | grep -q .; then
   kubectl apply -f - <<EOF >/dev/null
 apiVersion: llmfit.ai/v1alpha1
 kind: ModelClaim

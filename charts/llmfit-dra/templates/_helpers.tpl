@@ -19,7 +19,7 @@
 {{- end -}}
 
 {{- define "llmfit-dra.controllerServiceAccountName" -}}
-{{- include "llmfit-dra.serviceAccountName" . -}}-modelclaim
+{{- include "llmfit-dra.serviceAccountName" . -}}-controller
 {{- end -}}
 
 {{- define "llmfit-dra.labels" -}}
