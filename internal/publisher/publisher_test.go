@@ -67,6 +67,7 @@ func TestBuildDevicesAttributeMapping(t *testing.T) {
 	dgpu := devices[byName["gpu-0000-01-00-0"]]
 	assertStr(t, dgpu.Attributes, "vendor", "nvidia")
 	assertStr(t, dgpu.Attributes, "model", "NVIDIA GeForce RTX 4090")
+	assertInt(t, dgpu.Attributes, "computeTFLOPS", 165)
 	assertBool(t, dgpu.Attributes, "unifiedMemory", false)
 	assertInt(t, dgpu.Attributes, "memoryBandwidthGBs", 1008)
 	// Dedicated VRAM: capacity = VRAM, not system RAM.
@@ -253,6 +254,8 @@ func TestBuildDevicesLLMFitBandwidthFallsBackToIndex(t *testing.T) {
 		assertStr(t, d.Attributes, "source", "llmfit")
 		// Bandwidth rescued from the PCI-ID index (1002:1586 = Strix Halo).
 		assertInt(t, d.Attributes, "memoryBandwidthGBs", 256)
+		// Compute is index-only and rides along even when llmfit wins the join.
+		assertInt(t, d.Attributes, "computeTFLOPS", 59)
 		return
 	}
 	t.Fatal("gpu0 not built")

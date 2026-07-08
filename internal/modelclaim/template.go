@@ -6,8 +6,9 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
+
+	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
 )
 
 const (
@@ -29,33 +30,49 @@ const (
 // unsatisfiable for every ModelClaim. Naming the CPU class is an explicit
 // "I accept CPU speed" — the memory fit still holds; the tok/s floor is
 // waived.
-func FitCEL(b *Bounds, deviceClassName string) string {
+//
+// minComputeTFLOPS is the OPT-IN compute floor (prefill/TTFT physics). It is
+// claim intent rather than resolved physics — deliberately not part of
+// Bounds, which is shared through the resolve cache — and unlike bandwidth
+// it is NOT waived for the CPU class: setting an explicit floor on a class
+// whose devices publish no compute number is a contradiction the Satisfiable
+// condition should say out loud, not paper over.
+func FitCEL(b *Bounds, deviceClassName string, minComputeTFLOPS int64) string {
 	d := DriverDomain
+	var expr string
 	if deviceClassName == "cpu."+d {
-		return fmt.Sprintf(
+		expr = fmt.Sprintf(
 			"'memory' in device.capacity['%[1]s'] && "+
 				"device.capacity['%[1]s'].memory.compareTo(quantity('%[2]dGi')) >= 0 && "+
 				"'healthy' in device.attributes['%[1]s'] && "+
 				"device.attributes['%[1]s'].healthy",
 			d, b.MemoryGi)
+	} else {
+		expr = fmt.Sprintf(
+			"'memory' in device.capacity['%[1]s'] && "+
+				"device.capacity['%[1]s'].memory.compareTo(quantity('%[2]dGi')) >= 0 && "+
+				"'memoryBandwidthGBs' in device.attributes['%[1]s'] && "+
+				"device.attributes['%[1]s'].memoryBandwidthGBs >= %[3]d && "+
+				"'healthy' in device.attributes['%[1]s'] && "+
+				"device.attributes['%[1]s'].healthy",
+			d, b.MemoryGi, b.MinBandwidthGBs)
 	}
-	return fmt.Sprintf(
-		"'memory' in device.capacity['%[1]s'] && "+
-			"device.capacity['%[1]s'].memory.compareTo(quantity('%[2]dGi')) >= 0 && "+
-			"'memoryBandwidthGBs' in device.attributes['%[1]s'] && "+
-			"device.attributes['%[1]s'].memoryBandwidthGBs >= %[3]d && "+
-			"'healthy' in device.attributes['%[1]s'] && "+
-			"device.attributes['%[1]s'].healthy",
-		d, b.MemoryGi, b.MinBandwidthGBs)
+	if minComputeTFLOPS > 0 {
+		expr += fmt.Sprintf(" && "+
+			"'computeTFLOPS' in device.attributes['%[1]s'] && "+
+			"device.attributes['%[1]s'].computeTFLOPS >= %[2]d",
+			d, minComputeTFLOPS)
+	}
+	return expr
 }
 
 // BuildTemplate renders the desired ResourceClaimTemplate for a ModelClaim:
 // same name/namespace, owned by the claim (GC), one device request whose
 // selectors are the generated fit CEL ANDed with any extraSelectors (DRA
 // ANDs all selectors on a request).
-func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
+func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
 	selectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b, deviceClassName)},
+		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b, deviceClassName, computeFloor(mc))},
 	}}
 	for _, cel := range extraSelectors {
 		if s := strings.TrimSpace(cel); s != "" {
@@ -66,19 +83,21 @@ func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName str
 	}
 	return &resourceapi.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      mc.GetName(),
-			Namespace: mc.GetNamespace(),
-			Labels:    map[string]string{ManagedByLabel: labelValue(mc.GetName())},
+			Name:      mc.Name,
+			Namespace: mc.Namespace,
+			Labels:    map[string]string{ManagedByLabel: labelValue(mc.Name)},
 			Annotations: map[string]string{
 				"llmfit.ai/model":            b.Model,
 				"llmfit.ai/quant":            b.Quant,
 				"llmfit.ai/resolver-version": b.ResolverVersion,
 			},
+			// APIVersion/Kind from package constants, not mc.TypeMeta — typed
+			// objects legitimately carry an empty TypeMeta.
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         mc.GetAPIVersion(),
-				Kind:               mc.GetKind(),
-				Name:               mc.GetName(),
-				UID:                mc.GetUID(),
+				APIVersion:         apiv1alpha1.GroupVersion.String(),
+				Kind:               apiv1alpha1.ModelClaimKind,
+				Name:               mc.Name,
+				UID:                mc.UID,
 				Controller:         ptr.To(true),
 				BlockOwnerDeletion: ptr.To(true),
 			}},
@@ -97,6 +116,14 @@ func BuildTemplate(mc *unstructured.Unstructured, b *Bounds, deviceClassName str
 			},
 		},
 	}
+}
+
+// computeFloor reads the opt-in compute floor from the claim spec (0 = unset).
+func computeFloor(mc *apiv1alpha1.ModelClaim) int64 {
+	if mc.Spec.MinComputeTFLOPS != nil {
+		return *mc.Spec.MinComputeTFLOPS
+	}
+	return 0
 }
 
 // labelValue makes s a valid label value: CR names may run to 253 chars but

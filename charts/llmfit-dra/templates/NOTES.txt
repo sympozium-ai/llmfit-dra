@@ -4,7 +4,7 @@ Inspect the published accelerator inventory:
 
   kubectl get resourceslices -o yaml
 
-{{- if .Values.modelClaimController.enabled }}
+{{- if .Values.controller.enabled }}
 Ask for a model — the physics picks the device:
 
   kubectl apply -f - <<'EOF'

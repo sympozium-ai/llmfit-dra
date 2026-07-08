@@ -4,7 +4,8 @@ IMAGE = $(REGISTRY):$(TAG)
 KIND_CLUSTER ?= tailnet
 NAMESPACE ?= llmfit-dra
 
-.PHONY: help build test fmt vet docker-build image kind-load sideload kind-reload \
+.PHONY: help build test fmt vet generate verify-generate docker-build image \
+        kind-load sideload kind-reload \
         deploy deploy-helm deploy-local undeploy undeploy-helm helm-lint \
         pull-secret scenarios scenarios-cpu
 
@@ -24,6 +25,27 @@ fmt: ## Run gofmt
 
 vet: ## Run go vet
 	go vet ./...
+
+##@ Code generation
+
+# The ModelClaim CRD is generated from api/v1alpha1 (a standalone Go module
+# consumers can import without the driver). deploy/ and the chart's crds/
+# copy stay in lockstep because both are written by `make generate`.
+CONTROLLER_GEN_VERSION ?= v0.19.0
+CONTROLLER_GEN = bin/controller-gen
+
+$(CONTROLLER_GEN):
+	GOBIN=$(abspath bin) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+
+generate: $(CONTROLLER_GEN) ## Regenerate deepcopy + the ModelClaim CRD from api/ types
+	cd api && $(abspath $(CONTROLLER_GEN)) object paths=./...
+	cd api && $(abspath $(CONTROLLER_GEN)) crd:allowDangerousTypes=true paths=./... output:crd:dir=$(abspath .crd-gen)
+	{ cat hack/modelclaim-crd-header.yaml; tail -n +2 .crd-gen/llmfit.ai_modelclaims.yaml; } > deploy/modelclaim-crd.yaml
+	cp deploy/modelclaim-crd.yaml charts/llmfit-dra/crds/modelclaim.yaml
+	rm -rf .crd-gen
+
+verify-generate: generate ## CI check: api types, deepcopy, and CRD copies agree
+	git diff --exit-code -- api deploy/modelclaim-crd.yaml charts/llmfit-dra/crds/modelclaim.yaml
 
 # llmfit is built from the pinned submodule inside the Dockerfile.
 docker-build: ## Build the driver image ($(REGISTRY):$(TAG))

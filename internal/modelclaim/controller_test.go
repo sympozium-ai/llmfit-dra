@@ -15,6 +15,9 @@ import (
 	dynfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
+
+	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
 )
 
 // fakeResolver returns canned bounds (or a canned error) and counts calls, so
@@ -33,27 +36,40 @@ func (f *fakeResolver) Resolve(_ context.Context, _ string, _ float64, _ string,
 	return f.bounds, nil
 }
 
-// reconcileMC builds a ModelClaim unstructured with enough metadata for the
-// reconcile path: UID (ownerRef), generation (observedGeneration), and a spec.
-func reconcileMC(model string) *unstructured.Unstructured {
+// reconcileMC builds a ModelClaim with enough metadata for the reconcile
+// path: UID (ownerRef), generation (observedGeneration), and a spec.
+func reconcileMC(model string) *apiv1alpha1.ModelClaim {
 	mc := testMC()
-	mc.SetGeneration(3)
-	_ = unstructured.SetNestedField(mc.Object, model, "spec", "model")
-	_ = unstructured.SetNestedField(mc.Object, float64(20), "spec", "minTps")
+	mc.Generation = 3
+	mc.Spec.Model = model
+	mc.Spec.MinTps = ptr.To(20.0)
 	return mc
+}
+
+// mustUnstructured converts a typed ModelClaim into the unstructured shape
+// the dynamic informer/client delivers in production.
+func mustUnstructured(t *testing.T, mc *apiv1alpha1.ModelClaim) *unstructured.Unstructured {
+	t.Helper()
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mc)
+	if err != nil {
+		t.Fatalf("to unstructured: %v", err)
+	}
+	return &unstructured.Unstructured{Object: obj}
 }
 
 // newTestController wires a Controller against fake clients and injects the
 // ModelClaim into both the dynamic tracker (updateStatus does a fresh GET)
-// and the informer store (reconcile reads from it). Informers are never
-// started — reconcile is driven directly.
-func newTestController(t *testing.T, r Resolver, mc *unstructured.Unstructured, k8sObjs ...runtime.Object) (*Controller, *dynfake.FakeDynamicClient, *k8sfake.Clientset) {
+// and the informer store (reconcile reads from it) — as unstructured, the
+// shape production informers deliver. Informers are never started —
+// reconcile is driven directly.
+func newTestController(t *testing.T, r Resolver, mc *apiv1alpha1.ModelClaim, k8sObjs ...runtime.Object) (*Controller, *dynfake.FakeDynamicClient, *k8sfake.Clientset) {
 	t.Helper()
+	u := mustUnstructured(t, mc)
 	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{GVR: "ModelClaimList"}, mc)
+		map[schema.GroupVersionResource]string{GVR: "ModelClaimList"}, u)
 	cs := k8sfake.NewClientset(k8sObjs...)
 	c := New(dyn, cs, r)
-	if err := c.mcInformer.GetStore().Add(mc); err != nil {
+	if err := c.mcInformer.GetStore().Add(u); err != nil {
 		t.Fatalf("seeding informer store: %v", err)
 	}
 	return c, dyn, cs

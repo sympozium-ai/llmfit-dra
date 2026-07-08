@@ -27,8 +27,16 @@ jobs:
           go-version-file: go.mod
       - name: Vet
         run: go vet ./...
+      - name: Vet (api module)
+        working-directory: api
+        run: go vet ./...
       - name: Unit tests (race detector on)
         run: go test -race ./...
+      - name: Unit tests (api module)
+        working-directory: api
+        run: go test -race ./...
+      - name: Generated artifacts are current (deepcopy + CRD copies)
+        run: make verify-generate
       - name: Helm lint
         run: helm lint charts/llmfit-dra
 

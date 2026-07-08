@@ -61,13 +61,15 @@ func kindForClass(deviceClassName string) string {
 
 // EvaluateSlices statically checks the resolved bounds against published
 // ResourceSlices. The generated constraint is a known inequality — memory,
-// bandwidth, healthy — so no CEL engine is needed; this stays a cheap,
-// advisory computation (it never gates template creation).
-func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]string, b *Bounds, deviceClassName string) Candidates {
+// bandwidth, compute, healthy — so no CEL engine is needed; this stays a
+// cheap, advisory computation (it never gates template creation).
+// minComputeTFLOPS mirrors FitCEL's opt-in compute clause (0 = unset).
+func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]string, b *Bounds, deviceClassName string, minComputeTFLOPS int64) Candidates {
 	wantKind := kindForClass(deviceClassName)
 	memFloor := int64(b.MemoryGi) * 1024 * 1024 * 1024
 	// Mirrors FitCEL: the CPU class waives the bandwidth floor (CPU devices
-	// publish none; naming the class is an explicit CPU opt-in).
+	// publish none; naming the class is an explicit CPU opt-in). The compute
+	// floor is NOT waived — it is itself an explicit opt-in.
 	bwRequired := deviceClassName != "cpu."+DriverDomain
 
 	// DRA contract: only slices from a pool's highest generation are current.
@@ -116,7 +118,7 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 				}
 			}
 
-			var memOK, bwOK, healthyOK bool
+			var memOK, bwOK, computeOK, healthyOK bool
 			var mem int64
 			if cap, ok := dev.Capacity["memory"]; ok {
 				mem = cap.Value.Value()
@@ -130,11 +132,16 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 			if !bwRequired {
 				bwOK = true
 			}
+			var compute int64
+			if a, ok := attrs["computeTFLOPS"]; ok && a.IntValue != nil {
+				compute = *a.IntValue
+			}
+			computeOK = minComputeTFLOPS == 0 || compute >= minComputeTFLOPS
 			if h, ok := attrs["healthy"]; ok && h.BoolValue != nil {
 				healthyOK = *h.BoolValue
 			}
 
-			if memOK && bwOK && healthyOK {
+			if memOK && bwOK && computeOK && healthyOK {
 				devices++
 				if node != "" {
 					nodes[node] = true
@@ -153,7 +160,7 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 			// Track the nearest miss for the shortfall message. Score by the
 			// fraction of constraints met, tie-broken by bandwidth ratio.
 			score := 0.0
-			for _, ok := range []bool{memOK, bwOK, healthyOK} {
+			for _, ok := range []bool{memOK, bwOK, computeOK, healthyOK} {
 				if ok {
 					score += 1.0
 				}
@@ -172,6 +179,13 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 						reasons = append(reasons, "no memoryBandwidthGBs published")
 					} else {
 						reasons = append(reasons, fmt.Sprintf("bandwidth %d < %d GB/s", bw, b.MinBandwidthGBs))
+					}
+				}
+				if !computeOK {
+					if compute == 0 {
+						reasons = append(reasons, "no computeTFLOPS published")
+					} else {
+						reasons = append(reasons, fmt.Sprintf("compute %d < %d TFLOPS", compute, minComputeTFLOPS))
 					}
 				}
 				if !healthyOK {

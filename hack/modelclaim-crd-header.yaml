@@ -1,0 +1,9 @@
+# GENERATED FILE — do not edit. Source of truth: api/v1alpha1/modelclaim_types.go.
+# Regenerate with `make generate`; CI keeps this fresh via `make verify-generate`.
+#
+# ModelClaim: "run <model>" as a Kubernetes object (docs/design/modelclaim.md).
+# The controller resolves spec.model against llmfit's database and reconciles
+# a SAME-NAMED ResourceClaimTemplate; pods reference it with plain
+# `resourceClaimTemplateName: <name>`. Structural validation lives here
+# (schema + CEL rules) — no admission webhooks. Semantic errors (model not
+# in the database) surface asynchronously as the Resolved condition.

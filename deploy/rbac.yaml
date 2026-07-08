@@ -49,13 +49,13 @@ subjects:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: llmfit-dra-modelclaim
+  name: llmfit-dra-controller
   namespace: llmfit-dra
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: llmfit-dra-modelclaim
+  name: llmfit-dra-controller
 rules:
   - apiGroups: ["llmfit.ai"]
     resources: ["modelclaims"]
@@ -81,12 +81,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: llmfit-dra-modelclaim
+  name: llmfit-dra-controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: llmfit-dra-modelclaim
+  name: llmfit-dra-controller
 subjects:
   - kind: ServiceAccount
-    name: llmfit-dra-modelclaim
+    name: llmfit-dra-controller
     namespace: llmfit-dra

@@ -1,0 +1,43 @@
+# Compute-floored ModelClaim: the prefill/TTFT axis.
+#
+# Decode is memory-bandwidth-bound (minTps sets the bandwidth floor); prefill
+# is COMPUTE-bound — time-to-first-token over a long context is governed by
+# FLOPs, not GB/s. minComputeTFLOPS is the opt-in floor for that axis, against
+# the curated `computeTFLOPS` attribute (effective dense FP16, vendor spec
+# sheets, index-sourced).
+#
+# The two floors compose into one claim: "decodes at 20 tok/s AND has the
+# compute to chew through a long prefill". On a mixed fleet this is what
+# separates a prefill-pool device from a decode-pool device with the same
+# VRAM (see 07-disaggregated-prefill-decode.yaml for the two-pool pattern).
+#
+# Unlike the bandwidth floor, the compute floor is NOT waived on the cpu
+# class: it is an explicit ask, so a device publishing no computeTFLOPS is an
+# explicit non-match — Satisfiable says so ("no computeTFLOPS published")
+# instead of papering over it.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-prefill-grade
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  minTps: 20
+  minComputeTFLOPS: 120
+---
+# Consume it like any ModelClaim: same-named template, stock scheduler.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prefill-grade-consumer
+spec:
+  restartPolicy: Never
+  resourceClaims:
+    - name: model
+      resourceClaimTemplateName: qwen-prefill-grade
+  containers:
+    - name: main
+      image: busybox:1.36
+      command: ["sh", "-c", "env | grep LLMFIT"]
+      resources:
+        claims:
+          - name: model

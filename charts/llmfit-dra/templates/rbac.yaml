@@ -49,7 +49,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "llmfit-dra.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
-{{- if .Values.modelClaimController.enabled }}
+{{- if .Values.controller.enabled }}
 ---
 {{- if .Values.serviceAccount.create }}
 apiVersion: v1
@@ -59,7 +59,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llmfit-dra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: modelclaim-controller
+    app.kubernetes.io/component: controller
 ---
 {{- end }}
 # ModelClaim-controller role: cluster-scoped reconciliation only. It is also
@@ -68,10 +68,10 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  name: {{ include "llmfit-dra.fullname" . }}-controller
   labels:
     {{- include "llmfit-dra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: modelclaim-controller
+    app.kubernetes.io/component: controller
 rules:
   # Reconcile ModelClaims into same-named ResourceClaimTemplates and report
   # status/satisfiability.
@@ -99,14 +99,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  name: {{ include "llmfit-dra.fullname" . }}-controller
   labels:
     {{- include "llmfit-dra.labels" . | nindent 4 }}
-    app.kubernetes.io/component: modelclaim-controller
+    app.kubernetes.io/component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "llmfit-dra.fullname" . }}-modelclaim
+  name: {{ include "llmfit-dra.fullname" . }}-controller
 subjects:
   - kind: ServiceAccount
     name: {{ include "llmfit-dra.controllerServiceAccountName" . }}
