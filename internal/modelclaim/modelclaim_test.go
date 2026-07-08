@@ -32,7 +32,7 @@ func testBounds() *Bounds {
 // FitCEL must stay in lockstep with llmfit-core claim.rs render(): guarded
 // membership checks so missing attributes are non-matches, not CEL errors.
 func TestFitCELGolden(t *testing.T) {
-	cel := FitCEL(testBounds(), DriverDomain)
+	cel := FitCEL(testBounds(), DriverDomain, 0)
 	for _, want := range []string{
 		"'memory' in device.capacity['llmfit.ai']",
 		"device.capacity['llmfit.ai'].memory.compareTo(quantity('18Gi')) >= 0",
@@ -51,7 +51,7 @@ func TestFitCELCPUClassWaivesBandwidth(t *testing.T) {
 	// CPU devices publish no memoryBandwidthGBs; the cpu class would be
 	// structurally unsatisfiable if the fit CEL demanded it. Memory and
 	// health still hold.
-	cel := FitCEL(testBounds(), "cpu.llmfit.ai")
+	cel := FitCEL(testBounds(), "cpu.llmfit.ai", 0)
 	if strings.Contains(cel, "memoryBandwidthGBs") {
 		t.Errorf("cpu-class fit CEL must not require bandwidth:\n%s", cel)
 	}
@@ -160,7 +160,7 @@ func TestEvaluateSlicesSatisfied(t *testing.T) {
 		slice("node-a", device("gpu0", "gpu", 24, 936, true, false), device("cpu0", "cpu", 64, 0, true, false)),
 		slice("node-b", device("gpu0", "gpu", 24, 936, true, false)),
 	}
-	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai")
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai", 0)
 	if c.Devices != 2 || c.Nodes != 2 {
 		t.Fatalf("want 2 devices on 2 nodes, got %+v", c)
 	}
@@ -173,7 +173,7 @@ func TestEvaluateSlicesShortfall(t *testing.T) {
 	slices := []*resourceapi.ResourceSlice{
 		slice("strix", device("gpu0", "gpu", 96, 256, true, false)),
 	}
-	c := EvaluateSlices(slices, nil, b, "llmfit.ai")
+	c := EvaluateSlices(slices, nil, b, "llmfit.ai", 0)
 	if c.Devices != 0 {
 		t.Fatalf("want no candidates, got %+v", c)
 	}
@@ -189,7 +189,7 @@ func TestEvaluateSlicesCPUOnlyNoBandwidth(t *testing.T) {
 	slices := []*resourceapi.ResourceSlice{
 		slice("kind-node", device("cpu0", "cpu", 64, 0, true, false)),
 	}
-	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai")
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai", 0)
 	if c.Devices != 0 {
 		t.Fatalf("want no candidates, got %+v", c)
 	}
@@ -206,11 +206,11 @@ func TestEvaluateSlicesExclusions(t *testing.T) {
 			device("npu0", "npu", 24, 936, true, false),  // wrong kind for gpu class
 		),
 	}
-	if c := EvaluateSlices(slices, nil, testBounds(), "gpu.llmfit.ai"); c.Devices != 0 {
+	if c := EvaluateSlices(slices, nil, testBounds(), "gpu.llmfit.ai", 0); c.Devices != 0 {
 		t.Fatalf("want 0 candidates for gpu class, got %+v", c)
 	}
 	// The npu class does match npu0.
-	if c := EvaluateSlices(slices, nil, testBounds(), "npu.llmfit.ai"); c.Devices != 1 {
+	if c := EvaluateSlices(slices, nil, testBounds(), "npu.llmfit.ai", 0); c.Devices != 1 {
 		t.Fatalf("want npu candidate, got %+v", c)
 	}
 }
@@ -231,13 +231,13 @@ func TestEvaluateSlicesSubtractsAllocated(t *testing.T) {
 	setPool(slices[1], "node-b")
 	allocated := map[string]string{"node-a/gpu0": "default/other-claim"}
 
-	c := EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai")
+	c := EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai", 0)
 	if c.Devices != 2 || c.Available != 1 {
 		t.Fatalf("want 2 devices / 1 available, got %+v", c)
 	}
 
 	allocated["node-b/gpu0"] = "team-a/another"
-	c = EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai")
+	c = EvaluateSlices(slices, allocated, testBounds(), "llmfit.ai", 0)
 	if c.Devices != 2 || c.Available != 0 || c.HeldBy == "" {
 		t.Fatalf("want 2 devices / 0 available with a named holder, got %+v", c)
 	}
@@ -305,5 +305,74 @@ func TestExecResolverError(t *testing.T) {
 		t.Fatal("want error from failing resolver")
 	} else if !strings.Contains(err.Error(), "no model found") {
 		t.Errorf("stderr not surfaced: %v", err)
+	}
+}
+
+// withCompute adds the curated computeTFLOPS attribute to a test device.
+func withCompute(d resourceapi.Device, tflops int64) resourceapi.Device {
+	d.Attributes["computeTFLOPS"] = resourceapi.DeviceAttribute{IntValue: ptr.To(tflops)}
+	return d
+}
+
+func TestFitCELComputeFloor(t *testing.T) {
+	// Opt-in clause, membership-guarded like every other lookup.
+	cel := FitCEL(testBounds(), DriverDomain, 120)
+	for _, want := range []string{
+		"'computeTFLOPS' in device.attributes['llmfit.ai']",
+		"device.attributes['llmfit.ai'].computeTFLOPS >= 120",
+	} {
+		if !strings.Contains(cel, want) {
+			t.Errorf("FitCEL missing %q in:\n%s", want, cel)
+		}
+	}
+	// Unset floor must not mention compute at all.
+	if strings.Contains(FitCEL(testBounds(), DriverDomain, 0), "computeTFLOPS") {
+		t.Error("unset compute floor must not emit a compute clause")
+	}
+	// Unlike bandwidth, the floor is NOT waived on the cpu class: an explicit
+	// ask on a class that publishes no compute number should be visibly
+	// unsatisfiable, not silently dropped.
+	if !strings.Contains(FitCEL(testBounds(), "cpu.llmfit.ai", 120), "computeTFLOPS >= 120") {
+		t.Error("cpu-class fit CEL must keep an explicit compute floor")
+	}
+}
+
+func TestBuildTemplateComputeFloor(t *testing.T) {
+	mc := testMC()
+	mc.Spec.MinComputeTFLOPS = ptr.To(int64(120))
+	tpl := BuildTemplate(mc, testBounds(), DriverDomain, nil)
+	if !strings.Contains(tpl.Spec.Spec.Devices.Requests[0].Exactly.Selectors[0].CEL.Expression, "computeTFLOPS >= 120") {
+		t.Error("compute floor not rendered into the template CEL")
+	}
+	// A floor change must churn the template like any bounds change.
+	if !TemplateNeedsUpdate(BuildTemplate(testMC(), testBounds(), DriverDomain, nil), tpl) {
+		t.Error("adding a compute floor must need a template update")
+	}
+}
+
+func TestEvaluateSlicesComputeFloor(t *testing.T) {
+	slices := []*resourceapi.ResourceSlice{
+		slice("strix", withCompute(device("gpu0", "gpu", 96, 936, true, false), 59)),
+		slice("dc", withCompute(device("gpu0", "gpu", 96, 3350, true, false), 989)),
+	}
+	// Floor between the two devices: only the datacenter card matches.
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai", 120)
+	if c.Devices != 1 || c.Shortfall != "" {
+		t.Fatalf("want exactly the 989-TFLOPS device, got %+v", c)
+	}
+	// Floor above everything: shortfall names the compute gap.
+	c = EvaluateSlices(slices, nil, testBounds(), "llmfit.ai", 2000)
+	if c.Devices != 0 {
+		t.Fatalf("want no candidates, got %+v", c)
+	}
+	if !strings.Contains(c.Shortfall, "compute 989 < 2000 TFLOPS") {
+		t.Errorf("shortfall = %q", c.Shortfall)
+	}
+	// Device publishing no compute number: distinct message.
+	c = EvaluateSlices([]*resourceapi.ResourceSlice{
+		slice("plain", device("gpu0", "gpu", 96, 936, true, false)),
+	}, nil, testBounds(), "llmfit.ai", 120)
+	if c.Devices != 0 || !strings.Contains(c.Shortfall, "no computeTFLOPS published") {
+		t.Errorf("want 'no computeTFLOPS published' shortfall, got %+v", c)
 	}
 }

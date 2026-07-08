@@ -96,6 +96,11 @@ func (in *ModelClaimSpec) DeepCopyInto(out *ModelClaimSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.MinComputeTFLOPS != nil {
+		in, out := &in.MinComputeTFLOPS, &out.MinComputeTFLOPS
+		*out = new(int64)
+		**out = **in
+	}
 	if in.ExtraSelectors != nil {
 		in, out := &in.ExtraSelectors, &out.ExtraSelectors
 		*out = make([]string, len(*in))

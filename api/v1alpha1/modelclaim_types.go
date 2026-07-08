@@ -56,6 +56,15 @@ type ModelClaimSpec struct {
 	// +optional
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
+	// Compute floor in effective dense FP16 TFLOPS, for prefill/TTFT-bound
+	// stages (prefill is compute-bound where decode is bandwidth-bound).
+	// Opt-in: when set, the fit CEL additionally requires
+	// device.attributes['llmfit.ai'].computeTFLOPS >= this value, so devices
+	// publishing no compute number do not match — on any class, including CPU.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinComputeTFLOPS *int64 `json:"minComputeTFLOPS,omitempty"`
+
 	// Extra CEL expressions ANDed onto the generated selector (DRA ANDs all
 	// selectors). Never replaces the physics.
 	// +optional

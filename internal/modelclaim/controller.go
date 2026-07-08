@@ -371,7 +371,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	// ── Satisfiability (advisory) ──────────────────────────────────────
-	cands := c.evaluateCandidates(bounds, deviceClass)
+	cands := c.evaluateCandidates(bounds, deviceClass, computeFloor(mc))
 	satStatus, satReason, satMsg := satisfiableCondition(cands)
 
 	// Events on TRANSITIONS only: `kubectl get events -w` during a rollout
@@ -471,7 +471,7 @@ func (c *Controller) resolve(ctx context.Context, model string, minTps float64, 
 	return bounds, nil
 }
 
-func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string) Candidates {
+func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string, minComputeTFLOPS int64) Candidates {
 	var slices []*resourceapi.ResourceSlice
 	for _, obj := range c.sliceInformer.GetStore().List() {
 		if s, ok := obj.(*resourceapi.ResourceSlice); ok {
@@ -484,7 +484,7 @@ func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string) Candidate
 			claims = append(claims, rc)
 		}
 	}
-	return EvaluateSlices(slices, AllocatedDevices(claims), b, deviceClass)
+	return EvaluateSlices(slices, AllocatedDevices(claims), b, deviceClass, minComputeTFLOPS)
 }
 
 // updateStatus mutates .status via the status subresource with a fresh GET

@@ -148,6 +148,12 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 					// name). The PCI-ID index still can.
 					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.MemoryBandwidthGBs)}
 				}
+				// Compute is index-only for now: llmfit publishes no FLOPS
+				// signal, so the curated number rides along even when llmfit
+				// wins the capability join.
+				if found && entry.ComputeTFLOPS > 0 {
+					attrs["computeTFLOPS"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.ComputeTFLOPS)}
+				}
 				unified = ptr.To(lf.UnifiedMemory)
 				// llmfit's vram_gb is the fit budget (for APUs it already
 				// resolves to the shared pool).
@@ -159,6 +165,9 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 				attrs["model"] = resourceapi.DeviceAttribute{StringValue: ptr.To(truncate(entry.Model, 64))}
 				if entry.MemoryBandwidthGBs > 0 {
 					attrs["memoryBandwidthGBs"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.MemoryBandwidthGBs)}
+				}
+				if entry.ComputeTFLOPS > 0 {
+					attrs["computeTFLOPS"] = resourceapi.DeviceAttribute{IntValue: ptr.To(entry.ComputeTFLOPS)}
 				}
 				unified = ptr.To(entry.UnifiedMemory)
 			default:

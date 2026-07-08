@@ -18,8 +18,13 @@ type Entry struct {
 	// Model is the human/marketing name, e.g. "Intel Arc Graphics 140V".
 	Model string `json:"model"`
 	// MemoryBandwidthGBs is peak memory bandwidth in GB/s — the number the
-	// token-generation physics hangs off. 0 = unknown.
+	// token-generation (decode) physics hangs off. 0 = unknown.
 	MemoryBandwidthGBs int64 `json:"memoryBandwidthGBs"`
+	// ComputeTFLOPS is effective dense FP16 throughput in TFLOPS (tensor-core
+	// where applicable, no sparsity) — the number prefill/TTFT physics hangs
+	// off, from vendor spec sheets. 0 = unknown; the attribute is then not
+	// published, and compute-floored claims will not match the device.
+	ComputeTFLOPS int64 `json:"computeTFLOPS,omitempty"`
 	// UnifiedMemory marks devices that share system RAM by design.
 	UnifiedMemory bool `json:"unifiedMemory,omitempty"`
 }

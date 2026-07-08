@@ -12,6 +12,7 @@
   "1002:1586": {
     "model": "AMD Radeon 8060S (Strix Halo)",
     "memoryBandwidthGBs": 256,
+    "computeTFLOPS": 59,
     "unifiedMemory": true
   },
   "1022:17f0": {
@@ -26,26 +27,32 @@
   },
   "10de:2684": {
     "model": "NVIDIA GeForce RTX 4090",
-    "memoryBandwidthGBs": 1008
+    "memoryBandwidthGBs": 1008,
+    "computeTFLOPS": 165
   },
   "10de:2b85": {
     "model": "NVIDIA GeForce RTX 5090",
-    "memoryBandwidthGBs": 1792
+    "memoryBandwidthGBs": 1792,
+    "computeTFLOPS": 209
   },
   "10de:26b9": {
     "model": "NVIDIA L40S",
-    "memoryBandwidthGBs": 864
+    "memoryBandwidthGBs": 864,
+    "computeTFLOPS": 181
   },
   "10de:2330": {
     "model": "NVIDIA H100 SXM5 80GB",
-    "memoryBandwidthGBs": 3350
+    "memoryBandwidthGBs": 3350,
+    "computeTFLOPS": 989
   },
   "1002:744c": {
     "model": "AMD Radeon RX 7900 XTX",
-    "memoryBandwidthGBs": 960
+    "memoryBandwidthGBs": 960,
+    "computeTFLOPS": 122
   },
   "1002:74a1": {
     "model": "AMD Instinct MI300X",
-    "memoryBandwidthGBs": 5300
+    "memoryBandwidthGBs": 5300,
+    "computeTFLOPS": 1307
   }
 }

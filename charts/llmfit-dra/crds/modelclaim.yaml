@@ -98,6 +98,16 @@ spec:
                 items:
                   type: string
                 type: array
+              minComputeTFLOPS:
+                description: |-
+                  Compute floor in effective dense FP16 TFLOPS, for prefill/TTFT-bound
+                  stages (prefill is compute-bound where decode is bandwidth-bound).
+                  Opt-in: when set, the fit CEL additionally requires
+                  device.attributes['llmfit.ai'].computeTFLOPS >= this value, so devices
+                  publishing no compute number do not match — on any class, including CPU.
+                format: int64
+                minimum: 1
+                type: integer
               minTps:
                 default: 20
                 description: |-
