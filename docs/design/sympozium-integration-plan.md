@@ -113,3 +113,32 @@ Risks (beyond parent doc §7): Ensemble→Model ref-counting lifecycle bugs (mit
 2. `minTps` default for `auto` placements → nil (memory-floor-only) to preserve current semantics.
 3. Shared-Model ref-counting mechanism in 2.5(a) → annotation ref-count vs multi-ownerRef.
 4. Whether `request_model` ships in the same milestone or trails 2.5(a)/(b) by one release.
+
+## 10. Addendum (2026-07-08): open source + positioning consequences
+
+llmfit-dra is now **public**, which retires two constraints in this plan and
+the parent design's §6:
+
+- Sympozium may import the typed API module
+  (`github.com/sympozium-ai/llmfit-dra/api`, shipped in v0.3.0) directly —
+  the unstructured/GVK-strings indirection in Phase 2 is no longer required.
+  Amend Phase 2 step 1 accordingly.
+- The chart becomes a normal public dependency
+  (`oci://ghcr.io/sympozium-ai/charts/llmfit-dra`); the pull-secret pattern
+  in Phase 0 applies only to pre-release testing.
+
+Positioning docs now pin the boundary on both sides
+(`sympozium/docs/positioning.md`, llmfit-dra README "Positioning"). Two
+consequences fold into **Phase 3** as first-class work items rather than
+afterthoughts:
+
+- **node-probe leaves Sympozium.** Host-inference discovery is capability
+  inventory (supply side). Migration shape: publish discovered endpoints as
+  attributes on the node's llmfit.ai devices (or a companion slice), retire
+  the `sympozium.ai/inference-*` node annotations, keep the reverse-proxy
+  concern in Sympozium (it is an agent-facing consumption feature, not
+  inventory).
+- **The density dashboard is relabelled, not removed.** Post-Phase-1 it
+  reads only from ResourceSlices; the UI should present it as "cluster
+  capability (via llmfit-dra)" so no user re-learns it as a Sympozium
+  subsystem.

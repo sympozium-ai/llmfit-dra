@@ -49,6 +49,24 @@ ModelClaim "run Qwen3.6 at ≥20 tok/s"
    ──► your pod runs on silicon that can actually hold the model
 ```
 
+## Positioning: the layer this is
+
+llmfit-dra is the **capability layer**: it decides *where compute happens*.
+It sits between two neighbours it deliberately does not replace:
+
+| Layer | Owns | Decides |
+|-------|------|---------|
+| [Sympozium](https://github.com/sympozium-ai/sympozium) — coordination | Agents: identity, execution, policy, ensembles | What agents **do** |
+| **llmfit-dra** — capability | Accelerator inventory, fit physics, claims, placement | Where compute **happens** |
+| Serving engines (vLLM, SGLang, llama.cpp) — runtime | Batching, KV cache, disaggregation | How tokens **move** |
+
+A ModelClaim is to llmfit-dra what a PersistentVolumeClaim is to a CSI
+driver: any orchestrator (Sympozium included) *claims* a model the way an
+application claims a volume, and the stock scheduler satisfies the physics.
+llmfit-dra is never in the serving path — it places prefill-grade and
+decode-grade *pools* (see `examples/07` and `examples/09`), and the serving
+engine moves the tokens between them.
+
 ## Getting started
 
 Requires Kubernetes ≥ 1.34 (DRA GA). The image **and** the Helm chart are
