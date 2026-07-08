@@ -3,6 +3,14 @@
 **Run LLMs on the right accelerator using nothing but the Kubernetes
 scheduler.**
 
+<p align="center">
+  <img src="docs/assets/claim-lifecycle.gif" width="820"
+    alt="The model claim lifecycle, animated: llmfit-dra probes accelerators and publishes fit physics (31 tok/s, 74 tok/s, no fit); a ModelClaim for qwen3-32b at minTps 25 crosses from the coordination layer to the stock kube-scheduler, which selects the one node that satisfies it; the model is allocated exclusively and the endpoint is served back.">
+</p>
+<p align="center"><em>probe → publish → claim → schedule → allocate → serve.
+The driver publishes what each device can <strong>do</strong>; the stock
+kube-scheduler does the placement; the client never picks a node.</em></p>
+
 ```yaml
 # "Run Qwen3.6 at ≥20 tok/s" — as a Kubernetes object.
 apiVersion: llmfit.ai/v1alpha1
