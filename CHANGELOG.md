@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.7...v0.3.0) (2026-07-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **chart:** chart values key modelClaimController renamed to controller.
+
+### Features
+
+* **api:** standalone typed API module; generate the ModelClaim CRD from source ([171fb64](https://github.com/sympozium-ai/llmfit-dra/commit/171fb64aa8330b240d35d0791b3729d1418e0bf0))
+* **compute:** computeTFLOPS capability attribute and opt-in ModelClaim compute floor ([6393075](https://github.com/sympozium-ai/llmfit-dra/commit/639307513de39b4fcb92dcf97455939484aa1fb3))
+* review-driven hardening — correctness, observability, mixed-hardware readiness ([691932d](https://github.com/sympozium-ai/llmfit-dra/commit/691932d2d735efeaefaaa7dd194e21bde30125d4))
+
+
+### Code Refactoring
+
+* **chart:** rename the ModelClaim controller to llmfit-dra-controller ([7f1753d](https://github.com/sympozium-ai/llmfit-dra/commit/7f1753d52d58eea30c156e74b0db9dd63c7066fb))
+
 ## [0.2.7](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.6...v0.2.7) (2026-07-03)
 
 
