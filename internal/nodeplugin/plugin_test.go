@@ -206,3 +206,36 @@ func TestUnprepareRemovesSpecAndIsIdempotent(t *testing.T) {
 		t.Errorf("leftover file in CDI dir: %s", filepath.Join(dir, e.Name()))
 	}
 }
+
+// TestPrepareNICInjectsVerbsAndRDMACM: a NIC's edits are its uverbs node
+// plus the node-global /dev/infiniband/rdma_cm (librdmacm can't connect
+// without it), and LLMFIT_NETDEV names the paired RoCE interface.
+func TestPrepareNICInjectsVerbsAndRDMACM(t *testing.T) {
+	dir := t.TempDir()
+	inv := NewInventory()
+	inv.Set([]probe.Device{{
+		Kind: probe.KindNIC, Index: 0, Driver: "mlx5_core",
+		PCIAddr: "0000:41:00.0", DevNode: "/dev/infiniband/uverbs0",
+		NetDev: "eth401", IBPortActive: true,
+	}})
+	p := &Plugin{inv: inv, cdiDir: dir}
+
+	res := prepareOne(t, p, claimFor("uid-nic", "nic-0000-41-00-0"))
+	if res.Err != nil {
+		t.Fatalf("prepare failed: %v", res.Err)
+	}
+	edits := readSpec(t, dir, "uid-nic").Devices[0].ContainerEdits
+	wantNodes := []cdiDeviceNode{{Path: "/dev/infiniband/uverbs0"}, {Path: "/dev/infiniband/rdma_cm"}}
+	if !reflect.DeepEqual(edits.DeviceNodes, wantNodes) {
+		t.Errorf("device nodes = %v, want %v", edits.DeviceNodes, wantNodes)
+	}
+	wantEnv := []string{
+		"LLMFIT_DEVICE=nic-0000-41-00-0",
+		"LLMFIT_DEVICE_KIND=nic",
+		"LLMFIT_DEVICE_NIC_0000_41_00_0=/dev/infiniband/uverbs0",
+		"LLMFIT_NETDEV=eth401",
+	}
+	if !reflect.DeepEqual(edits.Env, wantEnv) {
+		t.Errorf("env = %v, want %v", edits.Env, wantEnv)
+	}
+}

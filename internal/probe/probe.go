@@ -23,6 +23,12 @@ const (
 	KindGPU Kind = "gpu"
 	KindNPU Kind = "npu"
 	KindCPU Kind = "cpu"
+	// KindNIC is an RDMA-capable fabric endpoint (/sys/class/infiniband).
+	// NICs are inventory for the fabric axis — "a GPU with the right NIC
+	// beside it" — never compute: a PCI function that appears under the
+	// infiniband class is excluded from the GPU/NPU walks (DPUs and
+	// converged cards present both faces).
+	KindNIC Kind = "nic"
 )
 
 // Device is one normalized entry from the device tree walk.
@@ -63,6 +69,20 @@ type Device struct {
 	// ASIC exposes one; the kubelet plugin uses it for ROCR_VISIBLE_DEVICES
 	// isolation on multi-GPU AMD nodes. Empty on APUs/ASICs without it.
 	UniqueID string
+
+	// NIC-only fields, read from the device's first port (multi-port HCAs
+	// are published as one device describing port 1 — a per-port split is
+	// deferred until a real dual-fabric node needs it).
+	//
+	// IBLinkLayer is the normalized transport: "infiniband" or "ethernet"
+	// (RoCE). IBRateGbps is the active link rate. IBPortActive is the port
+	// state — a down port is inventory, not capacity, and publishes
+	// unhealthy. NetDev is the associated netdev name (RoCE; empty on
+	// IB-only ports).
+	IBLinkLayer  string
+	IBRateGbps   uint64
+	IBPortActive bool
+	NetDev       string
 }
 
 // Healthy reports whether the device is usable, with a machine-readable
@@ -79,6 +99,17 @@ func (d Device) Healthy() (bool, string) {
 	}
 	if d.RASUncorrectable > 0 {
 		return false, "uncorrectableEcc"
+	}
+	if d.Kind == KindNIC {
+		if !d.IBPortActive {
+			return false, "portDown"
+		}
+		if d.DevNode == "" {
+			// No uverbs char device (ib_uverbs not loaded): the kubelet
+			// plugin has nothing to inject, so the NIC must not be
+			// allocatable through the healthy-gated default class.
+			return false, "noUverbsNode"
+		}
 	}
 	return true, ""
 }
@@ -113,23 +144,42 @@ func New(sysRoot, procRoot string) *Prober {
 	return &Prober{SysRoot: sysRoot, ProcRoot: procRoot}
 }
 
-// Walk enumerates GPUs (/sys/class/drm), NPUs (/sys/class/accel) and the CPU
-// fallback device. The result is sorted by kind then index so consecutive
-// walks of unchanged hardware compare deep-equal.
+// Walk enumerates GPUs (/sys/class/drm), NPUs (/sys/class/accel), RDMA NICs
+// (/sys/class/infiniband) and the CPU fallback device. The result is sorted
+// by kind then index so consecutive walks of unchanged hardware compare
+// deep-equal.
+//
+// Classification rule: a PCI function that appears under the infiniband
+// class is a fabric endpoint, not compute — it is dropped from the GPU/NPU
+// results even when it also registers a drm/accel entry (BlueField-class
+// DPUs, converged cards, and vendor offload engines present both faces).
 func (p *Prober) Walk() ([]Device, error) {
 	var devices []Device
+
+	nics, err := p.walkInfiniband()
+	if err != nil {
+		return nil, fmt.Errorf("walking infiniband class: %w", err)
+	}
+	fabricPCI := map[string]bool{}
+	for _, n := range nics {
+		if n.PCIAddr != "" {
+			fabricPCI[n.PCIAddr] = true
+		}
+	}
 
 	gpus, err := p.walkClass(filepath.Join(p.SysRoot, "class", "drm"), "card", KindGPU)
 	if err != nil {
 		return nil, fmt.Errorf("walking drm class: %w", err)
 	}
-	devices = append(devices, gpus...)
+	devices = append(devices, dropFabricFunctions(gpus, fabricPCI)...)
 
 	npus, err := p.walkClass(filepath.Join(p.SysRoot, "class", "accel"), "accel", KindNPU)
 	if err != nil {
 		return nil, fmt.Errorf("walking accel class: %w", err)
 	}
-	devices = append(devices, npus...)
+	devices = append(devices, dropFabricFunctions(npus, fabricPCI)...)
+
+	devices = append(devices, nics...)
 
 	cpu, err := p.cpuDevice()
 	if err != nil {
@@ -199,6 +249,116 @@ func (p *Prober) walkClass(classDir, prefix string, kind Kind) ([]Device, error)
 		idx++
 	}
 	return out, nil
+}
+
+// dropFabricFunctions filters compute candidates whose PCI function is also
+// an infiniband HCA — the classification rule from Walk's contract.
+func dropFabricFunctions(devices []Device, fabricPCI map[string]bool) []Device {
+	out := devices[:0]
+	for _, d := range devices {
+		if d.PCIAddr != "" && fabricPCI[d.PCIAddr] {
+			klog.V(1).InfoS("PCI function is an infiniband HCA; classified as fabric endpoint, not compute",
+				"pciAddress", d.PCIAddr, "droppedKind", d.Kind)
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// walkInfiniband enumerates RDMA-capable devices under /sys/class/infiniband.
+// Identity comes from the PCI device dir like every other kind; NIC facts
+// come from the first port (link_layer, rate, state) and the device's net/
+// subdir (the paired netdev on RoCE). The injectable /dev node is the
+// device's uverbs char device, paired via /sys/class/infiniband_verbs.
+func (p *Prober) walkInfiniband() ([]Device, error) {
+	classDir := filepath.Join(p.SysRoot, "class", "infiniband")
+	entries, err := os.ReadDir(classDir)
+	if os.IsNotExist(err) {
+		return nil, nil // no RDMA stack on this kernel — not an error
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var out []Device
+	idx := 0
+	for _, e := range entries {
+		devDir := filepath.Join(classDir, e.Name(), "device")
+		if _, err := os.Stat(devDir); err != nil {
+			continue // not a device-backed entry
+		}
+		port1 := filepath.Join(classDir, e.Name(), "ports", "1")
+		d := Device{
+			Kind:         KindNIC,
+			Index:        idx,
+			PCIVendor:    readHexID(filepath.Join(devDir, "vendor")),
+			PCIDevice:    readHexID(filepath.Join(devDir, "device")),
+			Driver:       readLinkBase(filepath.Join(devDir, "driver")),
+			IBLinkLayer:  normalizeLinkLayer(readTrimmed(filepath.Join(port1, "link_layer"))),
+			IBRateGbps:   parseRateGbps(readTrimmed(filepath.Join(port1, "rate"))),
+			IBPortActive: strings.Contains(readTrimmed(filepath.Join(port1, "state")), "ACTIVE"),
+			NetDev:       firstDirEntry(filepath.Join(devDir, "net")),
+			DevNode:      uverbsNode(p.SysRoot, e.Name()),
+		}
+		d.PCIAddr, d.PCIeRoot = pciAddress(devDir)
+		out = append(out, d)
+		idx++
+	}
+	return out, nil
+}
+
+// normalizeLinkLayer maps sysfs port link_layer values ("InfiniBand",
+// "Ethernet") to stable lowercase attribute values.
+func normalizeLinkLayer(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// parseRateGbps parses a sysfs port rate like "100 Gb/sec (4X EDR)" — the
+// leading number is the active link rate. Fractional rates (SDR 2.5 Gb/sec)
+// round down; 0 means unreadable.
+func parseRateGbps(s string) uint64 {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return 0
+	}
+	v, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return uint64(v)
+}
+
+// firstDirEntry returns the sole (or first, sorted) entry of a directory —
+// used for the HCA's net/ subdir, which lists its paired netdev.
+func firstDirEntry(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return entries[0].Name()
+}
+
+// uverbsNode pairs an ibdev with its user-verbs char device: each
+// /sys/class/infiniband_verbs/uverbsN names its owner in an ibdev file, and
+// the /dev/infiniband/uverbsN node follows devtmpfs convention. Empty when
+// the verbs class is absent (kernel without ib_uverbs) — the device is then
+// inventory the plugin cannot prepare.
+func uverbsNode(sysRoot, ibdev string) string {
+	verbsDir := filepath.Join(sysRoot, "class", "infiniband_verbs")
+	entries, err := os.ReadDir(verbsDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "uverbs") {
+			continue
+		}
+		if readTrimmed(filepath.Join(verbsDir, e.Name(), "ibdev")) == ibdev {
+			return "/dev/infiniband/" + e.Name()
+		}
+	}
+	return ""
 }
 
 func (p *Prober) cpuDevice() (Device, error) {

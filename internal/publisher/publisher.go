@@ -87,6 +87,37 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 
 		var memBytes uint64
 		switch d.Kind {
+		case probe.KindNIC:
+			// Fabric endpoint: identity + link facts, no capability join —
+			// llmfit's model DB and the PCI-ID index price accelerators, not
+			// HCAs. No memory capacity is published, so model-fit CEL never
+			// selects a NIC (same mechanism that excludes virtual display
+			// adapters). The value is the companion pattern: a claim's second
+			// request aligned with a GPU on resource.kubernetes.io/pcieRoot.
+			attrs["vendor"] = resourceapi.DeviceAttribute{StringValue: ptr.To(vendorName(d.PCIVendor))}
+			attrs["source"] = resourceapi.DeviceAttribute{StringValue: ptr.To("probe")}
+			if d.Driver != "" {
+				attrs["driver"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.Driver)}
+			}
+			if d.PCIAddr != "" {
+				attrs["pciAddress"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PCIAddr)}
+			}
+			if d.PCIeRoot != "" {
+				attrs["pcieRoot"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PCIeRoot)}
+				attrs["resource.kubernetes.io/pcieRoot"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.PCIeRoot)}
+			}
+			if d.IBLinkLayer != "" {
+				// "infiniband" or "ethernet" (RoCE) — the plane, per the
+				// fabric design: backplane speed and RDMA speed are not the
+				// same network.
+				attrs["linkLayer"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.IBLinkLayer)}
+			}
+			if d.IBRateGbps > 0 {
+				attrs["rateGbps"] = resourceapi.DeviceAttribute{IntValue: ptr.To(int64(d.IBRateGbps))}
+			}
+			if d.NetDev != "" {
+				attrs["netdev"] = resourceapi.DeviceAttribute{StringValue: ptr.To(d.NetDev)}
+			}
 		case probe.KindCPU:
 			attrs["vendor"] = resourceapi.DeviceAttribute{StringValue: ptr.To("cpu")}
 			attrs["unifiedMemory"] = resourceapi.DeviceAttribute{BoolValue: ptr.To(true)}
@@ -327,6 +358,10 @@ func vendorName(pciVendor string) string {
 		return "amd"
 	case "1da3":
 		return "habana"
+	case "15b3":
+		return "mellanox"
+	case "14e4":
+		return "broadcom"
 	// Virtual display adapters (hypervisor framebuffers). Published as
 	// facts like everything else — they carry no bandwidth attribute, so
 	// fit CEL never selects them.
