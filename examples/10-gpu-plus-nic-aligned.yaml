@@ -1,0 +1,66 @@
+# "I need a GPU — and ensure it has the right NIC."
+#
+# The fabric axis of disaggregated serving: KV-cache egress (NIXL/UCX,
+# GPUDirect RDMA) is only fast when the GPU and the RDMA NIC share a PCIe
+# root — peer-to-peer DMA between HBM and the HCA never crosses the CPU.
+# Request both in ONE claim, constrained to co-located silicon via the
+# standardized cross-driver attribute resource.kubernetes.io/pcieRoot —
+# the same pattern as 05 (GPU+NPU), with the NIC as the companion.
+#
+# NICs are enumerated from /sys/class/infiniband and published under
+# nic.llmfit.ai with linkLayer ("infiniband" | "ethernet" for RoCE) and
+# rateGbps attributes — so even before any claim, the slices answer
+# "is RDMA an option on this fleet at all":
+#
+#   kubectl get resourceslices -o json | jq '[.items[].spec.devices[]?
+#     | select(.attributes["llmfit.ai"].kind.string == "nic")]'
+#
+# A PCI function that is an infiniband HCA is never published as a GPU/NPU
+# (DPUs and converged cards present both faces); a down port or a missing
+# uverbs node publishes unhealthy, so the class can't allocate a NIC the
+# kubelet plugin can't inject (/dev/infiniband/uverbsN + rdma_cm).
+#
+# The claim-level selector below pins the fabric plane: RoCE at ≥ 100 Gb.
+# Drop it (or set "infiniband") to match your fleet.
+#
+#   kubectl apply -f 10-gpu-plus-nic-aligned.yaml
+#   kubectl wait --for=condition=Ready pod/llmfit-gdr-demo --timeout=120s
+#   kubectl logs llmfit-gdr-demo   # LLMFIT_DEVICE_GPU…, LLMFIT_DEVICE_NIC…, LLMFIT_NETDEV
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-nic-aligned-claim
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.llmfit.ai
+      - name: nic
+        exactly:
+          deviceClassName: nic.llmfit.ai
+          selectors:
+            - cel:
+                expression: >-
+                  device.attributes["llmfit.ai"].linkLayer == "ethernet" &&
+                  device.attributes["llmfit.ai"].rateGbps >= 100
+    constraints:
+      - requests: ["gpu", "nic"]
+        matchAttribute: resource.kubernetes.io/pcieRoot
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmfit-gdr-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo '--- llmfit env ---'; env | grep LLMFIT_ || echo '(none)'; ls -l /dev/infiniband 2>/dev/null; sleep 3600"]
+      resources:
+        claims:
+          - name: gdr
+  resourceClaims:
+    - name: gdr
+      resourceClaimName: gpu-nic-aligned-claim

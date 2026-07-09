@@ -329,3 +329,145 @@ func TestVRAMFromIntelLmem(t *testing.T) {
 	}
 	t.Fatal("intel dGPU missing")
 }
+
+// addIBDevice grafts an RDMA HCA onto the fake tree: a PCI device backing a
+// /sys/class/infiniband entry, port-1 facts, a paired netdev, and the
+// uverbs pairing under /sys/class/infiniband_verbs.
+func addIBDevice(t *testing.T, sysRoot, ibdev, pciRoot, pciAddr, linkLayer, rate, state, netdev, uverbs string) {
+	t.Helper()
+	realDev := filepath.Join(sysRoot, "devices", pciRoot, pciAddr)
+	mustMkdir(t, realDev)
+	mustWrite(t, filepath.Join(realDev, "vendor"), "0x15b3\n")
+	mustWrite(t, filepath.Join(realDev, "device"), "0x101d\n")
+	driverDir := filepath.Join(sysRoot, "bus", "pci", "drivers", "mlx5_core")
+	mustMkdir(t, driverDir)
+	if err := os.Symlink(driverDir, filepath.Join(realDev, "driver")); err != nil && !os.IsExist(err) {
+		t.Fatal(err)
+	}
+	if netdev != "" {
+		mustMkdir(t, filepath.Join(realDev, "net", netdev))
+	}
+	classEntry := filepath.Join(sysRoot, "class", "infiniband", ibdev)
+	mustMkdir(t, classEntry)
+	if err := os.Symlink(realDev, filepath.Join(classEntry, "device")); err != nil {
+		t.Fatal(err)
+	}
+	port1 := filepath.Join(classEntry, "ports", "1")
+	mustMkdir(t, port1)
+	mustWrite(t, filepath.Join(port1, "link_layer"), linkLayer+"\n")
+	mustWrite(t, filepath.Join(port1, "rate"), rate+"\n")
+	mustWrite(t, filepath.Join(port1, "state"), state+"\n")
+	if uverbs != "" {
+		verbsEntry := filepath.Join(sysRoot, "class", "infiniband_verbs", uverbs)
+		mustMkdir(t, verbsEntry)
+		mustWrite(t, filepath.Join(verbsEntry, "ibdev"), ibdev+"\n")
+	}
+}
+
+func TestWalkInfiniband(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	addIBDevice(t, sysRoot, "mlx5_0", "pci0000:40", "0000:41:00.0",
+		"Ethernet", "100 Gb/sec (4X EDR)", "4: ACTIVE", "eth401", "uverbs0")
+
+	devices, err := New(sysRoot, procRoot).Walk()
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	// 2 GPUs + 1 NPU + 1 NIC + 1 CPU
+	if len(devices) != 5 {
+		t.Fatalf("expected 5 devices, got %d: %+v", len(devices), devices)
+	}
+	var nic Device
+	for _, d := range devices {
+		if d.Kind == KindNIC {
+			nic = d
+		}
+	}
+	if nic.Name() != "nic-0000-41-00-0" {
+		t.Fatalf("nic name = %q, want nic-0000-41-00-0", nic.Name())
+	}
+	if nic.PCIVendor != "15b3" || nic.Driver != "mlx5_core" {
+		t.Errorf("nic identity = %s/%s, want 15b3/mlx5_core", nic.PCIVendor, nic.Driver)
+	}
+	if nic.PCIAddr != "0000:41:00.0" || nic.PCIeRoot != "pci0000:40" {
+		t.Errorf("nic pci = %s / %s", nic.PCIAddr, nic.PCIeRoot)
+	}
+	if nic.IBLinkLayer != "ethernet" {
+		t.Errorf("linkLayer = %q, want ethernet (normalized RoCE)", nic.IBLinkLayer)
+	}
+	if nic.IBRateGbps != 100 {
+		t.Errorf("rate = %d, want 100", nic.IBRateGbps)
+	}
+	if !nic.IBPortActive {
+		t.Error("port should be active")
+	}
+	if nic.NetDev != "eth401" {
+		t.Errorf("netdev = %q, want eth401", nic.NetDev)
+	}
+	if nic.DevNode != "/dev/infiniband/uverbs0" {
+		t.Errorf("devnode = %q, want /dev/infiniband/uverbs0 (paired via infiniband_verbs)", nic.DevNode)
+	}
+	if ok, _ := nic.Healthy(); !ok {
+		t.Error("active, bound, uverbs-backed NIC should be healthy")
+	}
+}
+
+// TestConvergedCardIsFabricNotCompute is the classification rule: a PCI
+// function that registers BOTH a drm entry and an infiniband entry (DPU /
+// converged card) must be published as a NIC only — never allocatable as
+// compute through gpu.llmfit.ai.
+func TestConvergedCardIsFabricNotCompute(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	// The HCA shares the PCI function with a drm card entry.
+	addIBDevice(t, sysRoot, "mlx5_0", "pci0000:40", "0000:41:00.0",
+		"InfiniBand", "200 Gb/sec (4X HDR)", "4: ACTIVE", "", "uverbs0")
+	realDev := filepath.Join(sysRoot, "devices", "pci0000:40", "0000:41:00.0")
+	mustMkdir(t, filepath.Join(realDev, "drm", "card2"))
+	classEntry := filepath.Join(sysRoot, "class", "drm", "card2")
+	mustMkdir(t, classEntry)
+	if err := os.Symlink(realDev, filepath.Join(classEntry, "device")); err != nil {
+		t.Fatal(err)
+	}
+
+	devices, err := New(sysRoot, procRoot).Walk()
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	for _, d := range devices {
+		if d.Kind == KindGPU && d.PCIAddr == "0000:41:00.0" {
+			t.Fatalf("converged card published as GPU: %+v", d)
+		}
+	}
+	var nics int
+	for _, d := range devices {
+		if d.Kind == KindNIC {
+			nics++
+			if d.IBLinkLayer != "infiniband" {
+				t.Errorf("linkLayer = %q, want infiniband", d.IBLinkLayer)
+			}
+		}
+	}
+	if nics != 1 {
+		t.Fatalf("expected exactly 1 NIC, got %d", nics)
+	}
+}
+
+func TestNICHealth(t *testing.T) {
+	cases := []struct {
+		name   string
+		dev    Device
+		want   bool
+		reason string
+	}{
+		{"active with uverbs", Device{Kind: KindNIC, Driver: "mlx5_core", IBPortActive: true, DevNode: "/dev/infiniband/uverbs0"}, true, ""},
+		{"port down", Device{Kind: KindNIC, Driver: "mlx5_core", IBPortActive: false, DevNode: "/dev/infiniband/uverbs0"}, false, "portDown"},
+		{"no uverbs node", Device{Kind: KindNIC, Driver: "mlx5_core", IBPortActive: true}, false, "noUverbsNode"},
+		{"unbound wins", Device{Kind: KindNIC, IBPortActive: true, DevNode: "/dev/infiniband/uverbs0"}, false, "driverUnbound"},
+	}
+	for _, c := range cases {
+		ok, reason := c.dev.Healthy()
+		if ok != c.want || reason != c.reason {
+			t.Errorf("%s: Healthy() = (%v, %q), want (%v, %q)", c.name, ok, reason, c.want, c.reason)
+		}
+	}
+}

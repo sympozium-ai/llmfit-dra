@@ -252,6 +252,16 @@ func editsFor(d probe.Device) containerEdits {
 	if d.Driver == "amdgpu" {
 		edits.DeviceNodes = append(edits.DeviceNodes, cdiDeviceNode{Path: "/dev/kfd"})
 	}
+	if d.Kind == probe.KindNIC && d.DevNode != "" {
+		// Verbs alone can't establish connections: librdmacm needs the
+		// node-global /dev/infiniband/rdma_cm beside the device's uverbs
+		// node (deduped per claim like /dev/kfd). LLMFIT_NETDEV names the
+		// paired netdev so RoCE consumers can bind the right interface.
+		edits.DeviceNodes = append(edits.DeviceNodes, cdiDeviceNode{Path: "/dev/infiniband/rdma_cm"})
+		if d.NetDev != "" {
+			edits.Env = append(edits.Env, "LLMFIT_NETDEV="+d.NetDev)
+		}
+	}
 	return edits
 }
 

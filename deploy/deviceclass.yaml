@@ -64,3 +64,20 @@ spec:
         expression: >-
           device.driver == "llmfit.ai" &&
           device.attributes["llmfit.ai"].kind == "cpu"
+---
+# RDMA-capable fabric endpoints (/sys/class/infiniband). Not compute — a
+# model never fits a NIC — but the companion half of "a GPU with the right
+# NIC beside it": request gpu.llmfit.ai + nic.llmfit.ai in one claim with a
+# resource.kubernetes.io/pcieRoot matchAttribute constraint (example 10).
+# healthy folds in port state (portDown) and preparability (noUverbsNode).
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: nic.llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "nic" &&
+          device.attributes["llmfit.ai"].healthy

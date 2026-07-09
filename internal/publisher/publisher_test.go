@@ -496,3 +496,71 @@ func TestParseVendorDrivers(t *testing.T) {
 		t.Error("empty flag must disable coexistence")
 	}
 }
+
+// TestBuildDevicesNIC covers the fabric-endpoint mapping: link facts as
+// attributes, no capability join, no memory capacity (so model-fit CEL can
+// never select a NIC), and the standardized pcieRoot for GPU+NIC alignment.
+func TestBuildDevicesNIC(t *testing.T) {
+	nic := probe.Device{
+		Kind: probe.KindNIC, Index: 0,
+		PCIVendor: "15b3", PCIDevice: "101d",
+		PCIAddr: "0000:41:00.0", PCIeRoot: "pci0000:40",
+		Driver:      "mlx5_core",
+		IBLinkLayer: "ethernet", IBRateGbps: 100, IBPortActive: true,
+		NetDev:  "eth401",
+		DevNode: "/dev/infiniband/uverbs0",
+	}
+	out := BuildDevices([]probe.Device{nic}, mustIndex(t), systemRAM, nil, Options{})
+	if len(out) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(out))
+	}
+	d := out[0]
+	if d.Name != "nic-0000-41-00-0" {
+		t.Errorf("name = %q", d.Name)
+	}
+	wantStr := map[k8sQualifiedName]string{
+		"kind":                            "nic",
+		"vendor":                          "mellanox",
+		"driver":                          "mlx5_core",
+		"linkLayer":                       "ethernet",
+		"netdev":                          "eth401",
+		"source":                          "probe",
+		"pcieRoot":                        "pci0000:40",
+		"resource.kubernetes.io/pcieRoot": "pci0000:40",
+	}
+	for k, want := range wantStr {
+		got := d.Attributes[k].StringValue
+		if got == nil || *got != want {
+			t.Errorf("attr %s = %v, want %q", k, got, want)
+		}
+	}
+	if rate := d.Attributes["rateGbps"].IntValue; rate == nil || *rate != 100 {
+		t.Errorf("rateGbps = %v, want 100", rate)
+	}
+	if healthy := d.Attributes["healthy"].BoolValue; healthy == nil || !*healthy {
+		t.Error("nic should publish healthy=true")
+	}
+	if len(d.Capacity) != 0 {
+		t.Errorf("nic must publish no capacity (got %v) — memory capacity would make it fit-selectable", d.Capacity)
+	}
+	if _, has := d.Attributes["vendorManaged"]; has {
+		t.Error("nic must not be vendorManaged-demoted")
+	}
+}
+
+// TestBuildDevicesNICUnhealthyPortDown: a down port publishes as unhealthy
+// so the healthy-gated nic class cannot allocate it.
+func TestBuildDevicesNICUnhealthyPortDown(t *testing.T) {
+	nic := probe.Device{
+		Kind: probe.KindNIC, PCIVendor: "15b3", PCIAddr: "0000:41:00.0",
+		Driver: "mlx5_core", IBPortActive: false, DevNode: "/dev/infiniband/uverbs0",
+	}
+	out := BuildDevices([]probe.Device{nic}, mustIndex(t), systemRAM, nil, Options{})
+	d := out[0]
+	if healthy := d.Attributes["healthy"].BoolValue; healthy == nil || *healthy {
+		t.Error("down port should publish healthy=false")
+	}
+	if reason := d.Attributes["healthReason"].StringValue; reason == nil || *reason != "portDown" {
+		t.Errorf("healthReason = %v, want portDown", reason)
+	}
+}
