@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.0...v0.3.1) (2026-07-09)
+
+
+### Features
+
+* RDMA NICs as claimable devices — the fabric-endpoint class ([34617cd](https://github.com/sympozium-ai/llmfit-dra/commit/34617cdbe047c6037427a7b183598ec2c4eda343))
+
 ## [0.3.0](https://github.com/sympozium-ai/llmfit-dra/compare/v0.2.7...v0.3.0) (2026-07-08)
 
 
