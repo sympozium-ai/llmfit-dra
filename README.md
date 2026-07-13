@@ -234,7 +234,7 @@ make scenarios              # 15-scenario live e2e suite (see hack/scenarios.sh)
 make help                   # everything else
 ```
 
-- `internal/probe` walks sysfs (identity, /dev nodes, health);
+- `pkg/probe` walks sysfs (identity, /dev nodes, health);
   `internal/publisher` joins probe ⋈ index ⋈ llmfit into ResourceSlices;
   `internal/nodeplugin` serves the kubelet DRA plugin (CDI); llmfit is a
   git submodule pinned to a release tag and built into the image.

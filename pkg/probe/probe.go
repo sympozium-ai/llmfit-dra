@@ -2,6 +2,9 @@
 // normalized inventory of accelerators. It is the "probe" half of llmfit's
 // probe ⋈ index model: identity comes from here, capability comes from the
 // index package.
+//
+// This package is a public API consumed by sibling projects (e.g. ergoz) for
+// vendor-neutral accelerator identification.
 package probe
 
 import (

@@ -70,7 +70,7 @@ devices *schedulable*; the kubelet plugin makes them *usable*.
 | Package | Responsibility |
 |---|---|
 | `cmd/llmfit-dra` | flags, kube client, the probe/publish loop, plugin + hotplug wiring |
-| `internal/probe` | sysfs/procfs walk: identity, `/dev` nodes, driver binding, RAS health (root-parameterized for tests) |
+| `pkg/probe` | sysfs/procfs walk: identity, `/dev` nodes, driver binding, RAS health (root-parameterized for tests) |
 | `internal/index` | embedded PCI-ID → capability table (`data.json`) |
 | `internal/llmfit` | capability source: `Detector` (API → exec → last-known-good), `unix://` client, exec shim |
 | `internal/publisher` | the probe ⋈ index ⋈ llmfit join → `resource.k8s.io/v1` devices; vendor coexistence |

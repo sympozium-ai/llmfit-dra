@@ -9,7 +9,7 @@ import (
 
 	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/llmfit"
-	"github.com/sympozium-ai/llmfit-dra/internal/probe"
+	"github.com/sympozium-ai/llmfit-dra/pkg/probe"
 )
 
 type (
