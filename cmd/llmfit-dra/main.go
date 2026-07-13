@@ -26,8 +26,8 @@ import (
 	"github.com/sympozium-ai/llmfit-dra/internal/modelclaim"
 	"github.com/sympozium-ai/llmfit-dra/internal/nodeplugin"
 	"github.com/sympozium-ai/llmfit-dra/internal/observe"
-	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 	"github.com/sympozium-ai/llmfit-dra/internal/publisher"
+	"github.com/sympozium-ai/llmfit-dra/pkg/probe"
 )
 
 func main() {

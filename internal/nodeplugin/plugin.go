@@ -28,8 +28,8 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/sympozium-ai/llmfit-dra/internal/observe"
-	"github.com/sympozium-ai/llmfit-dra/internal/probe"
 	"github.com/sympozium-ai/llmfit-dra/internal/publisher"
+	"github.com/sympozium-ai/llmfit-dra/pkg/probe"
 )
 
 // Inventory is the probe snapshot shared between the re-probe loop (writer)
