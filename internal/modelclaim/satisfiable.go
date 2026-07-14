@@ -92,6 +92,16 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 	bestMsg := ""
 	bestScore := -1.0 // higher = closer to satisfying
 
+	// Devices the default classes exclude as vendorManaged are invisible to
+	// the candidate count by design, but they must not be invisible to the
+	// diagnostics: on the most common NVIDIA topology (one GPU, no vendor
+	// DRA driver) the excluded GPU IS the story, and a shortfall that only
+	// mentions the CPU sends the operator in the wrong direction (issue #39).
+	// Track the largest-memory excluded device as the example to surface.
+	excluded := 0
+	exclName, exclNode, exclModel := "", "", ""
+	var exclMem int64 = -1
+
 	for _, slice := range slices {
 		if slice.Spec.Driver != DriverDomain {
 			continue
@@ -114,6 +124,18 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 			}
 			if deviceClassName == DriverDomain || deviceClassName == "gpu."+DriverDomain {
 				if vm := attrs["vendorManaged"]; vm.BoolValue != nil && *vm.BoolValue {
+					excluded++
+					var mem int64
+					if cap, ok := dev.Capacity["memory"]; ok {
+						mem = cap.Value.Value()
+					}
+					if mem > exclMem {
+						exclName, exclNode, exclMem = dev.Name, node, mem
+						exclModel = ""
+						if m := attrs["model"]; m.StringValue != nil {
+							exclModel = *m.StringValue
+						}
+					}
 					continue // demoted: the default classes exclude it
 				}
 			}
@@ -202,6 +224,32 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 	if devices == 0 {
 		if bestMsg == "" {
 			bestMsg = "no llmfit.ai devices published"
+		}
+		if excluded > 0 {
+			if bestMsg == "no llmfit.ai devices published" {
+				// Devices WERE published; every one of them was excluded.
+				bestMsg = "no other eligible devices published"
+			}
+			desc := exclName
+			var facts []string
+			if exclModel != "" {
+				facts = append(facts, exclModel)
+			}
+			if exclMem > 0 {
+				facts = append(facts, fmt.Sprintf("%dGi", exclMem/(1024*1024*1024)))
+			}
+			if len(facts) > 0 {
+				desc += " (" + join(facts) + ")"
+			}
+			if exclNode != "" {
+				desc += " on node " + exclNode
+			}
+			more := ""
+			if excluded > 1 {
+				more = fmt.Sprintf(" and %d more", excluded-1)
+			}
+			bestMsg = fmt.Sprintf("%s%s excluded: vendorManaged — this class only allocates devices llmfit-dra can prepare; install the vendor's DRA driver or opt in via a custom DeviceClass; %s",
+				desc, more, bestMsg)
 		}
 		c.Shortfall = bestMsg
 	}

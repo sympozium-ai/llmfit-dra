@@ -17,7 +17,7 @@ import (
 
 func testBounds() *Bounds {
 	return &Bounds{
-		Model:           "Qwen/Qwen3.6-30B-A3B",
+		Model:           "Qwen/Qwen3-30B-A3B",
 		ClaimName:       "qwen-qwen3-6-30b-a3b-fit",
 		Quant:           "Q4_K_M",
 		WeightsGb:       17.6,
@@ -72,7 +72,7 @@ func testMC() *apiv1alpha1.ModelClaim {
 			Kind:       apiv1alpha1.ModelClaimKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen36",
+			Name:      "qwen3",
 			Namespace: "team-a",
 			UID:       "uid-1",
 		},
@@ -82,7 +82,7 @@ func testMC() *apiv1alpha1.ModelClaim {
 func TestBuildTemplateShape(t *testing.T) {
 	tpl := BuildTemplate(testMC(), testBounds(), "gpu.llmfit.ai", []string{"device.attributes['llmfit.ai'].unifiedMemory"})
 
-	if tpl.Name != "qwen36" || tpl.Namespace != "team-a" {
+	if tpl.Name != "qwen3" || tpl.Namespace != "team-a" {
 		t.Fatalf("template must share the ModelClaim's name/namespace, got %s/%s", tpl.Namespace, tpl.Name)
 	}
 	if len(tpl.OwnerReferences) != 1 || tpl.OwnerReferences[0].Kind != "ModelClaim" || !*tpl.OwnerReferences[0].Controller {
@@ -215,6 +215,52 @@ func TestEvaluateSlicesExclusions(t *testing.T) {
 	}
 }
 
+// The bare-NVIDIA topology from issue #39: one vendorManaged (excluded) GPU
+// plus a CPU. The shortfall must name the excluded GPU and why, not just
+// point at the CPU.
+func TestEvaluateSlicesShortfallNamesVendorManagedExclusions(t *testing.T) {
+	gpu := device("gpu-0000-00-04-0", "gpu", 16, 320, true, true) // vendorManaged
+	gpu.Attributes["model"] = resourceapi.DeviceAttribute{StringValue: ptr.To("Tesla T4")}
+	slices := []*resourceapi.ResourceSlice{
+		slice("t4-node", gpu, device("cpu0", "cpu", 64, 0, true, false)),
+	}
+	c := EvaluateSlices(slices, nil, testBounds(), "llmfit.ai", 0)
+	if c.Devices != 0 {
+		t.Fatalf("want no candidates, got %+v", c)
+	}
+	for _, want := range []string{
+		"gpu-0000-00-04-0", "Tesla T4", "16Gi", "vendorManaged",
+		"vendor's DRA driver", "cpu0", "no memoryBandwidthGBs published",
+	} {
+		if !strings.Contains(c.Shortfall, want) {
+			t.Errorf("shortfall %q missing %q", c.Shortfall, want)
+		}
+	}
+}
+
+// Same topology through the gpu class: the excluded GPU is the ONLY device
+// of the right kind, so there is no "closest device" at all — the excluded
+// GPU must still be surfaced, without claiming nothing was published.
+func TestEvaluateSlicesShortfallExcludedOnlyDevice(t *testing.T) {
+	gpu := device("gpu0", "gpu", 16, 320, true, true)
+	gpu.Attributes["model"] = resourceapi.DeviceAttribute{StringValue: ptr.To("Tesla T4")}
+	slices := []*resourceapi.ResourceSlice{
+		slice("t4-node", gpu, device("cpu0", "cpu", 64, 0, true, false)),
+	}
+	c := EvaluateSlices(slices, nil, testBounds(), "gpu.llmfit.ai", 0)
+	if c.Devices != 0 {
+		t.Fatalf("want no candidates, got %+v", c)
+	}
+	for _, want := range []string{"gpu0", "Tesla T4", "vendorManaged"} {
+		if !strings.Contains(c.Shortfall, want) {
+			t.Errorf("shortfall %q missing %q", c.Shortfall, want)
+		}
+	}
+	if strings.Contains(c.Shortfall, "no llmfit.ai devices published") {
+		t.Errorf("shortfall %q must not claim nothing was published", c.Shortfall)
+	}
+}
+
 // Allocation-aware availability (issue #21): physics-satisfiable devices
 // held by allocated claims are counted but not available.
 func TestEvaluateSlicesSubtractsAllocated(t *testing.T) {
@@ -271,7 +317,7 @@ func TestExecResolver(t *testing.T) {
 	script := `#!/bin/sh
 echo "$@" > "` + dir + `/args"
 cat <<'EOF'
-{"model":"Qwen/Qwen3.6-30B-A3B","claimName":"qwen-fit","quant":"Q4_K_M",
+{"model":"Qwen/Qwen3-30B-A3B","claimName":"qwen-fit","quant":"Q4_K_M",
  "weightsGb":17.6,"memoryGi":18,"minBandwidthGBs":160,"minTps":20.0,
  "efficiencyPct":55,"deviceClass":"llmfit.ai","resolverVersion":"0.9.37"}
 EOF`
@@ -279,7 +325,7 @@ EOF`
 		t.Fatal(err)
 	}
 	r := &ExecResolver{Bin: stub}
-	b, err := r.Resolve(context.Background(), "Qwen/Qwen3.6-30B-A3B", 20, "", 0)
+	b, err := r.Resolve(context.Background(), "Qwen/Qwen3-30B-A3B", 20, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +333,7 @@ EOF`
 		t.Fatalf("parsed bounds wrong: %+v", b)
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args"))
-	for _, want := range []string{"--json", "claim", "Qwen/Qwen3.6-30B-A3B", "--min-tps 20"} {
+	for _, want := range []string{"--json", "claim", "Qwen/Qwen3-30B-A3B", "--min-tps 20"} {
 		if !strings.Contains(string(args), want) {
 			t.Errorf("args %q missing %q", string(args), want)
 		}

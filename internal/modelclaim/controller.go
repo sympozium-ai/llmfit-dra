@@ -290,7 +290,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	// that isn't a plain catalog/HF reference so a leading-dash value can
 	// never be parsed as a flag. Terminal until the spec changes — no requeue.
 	if !modelRefPattern.MatchString(model) {
-		msg := fmt.Sprintf("spec.model %q is not a valid model reference (want org/name or name, e.g. Qwen/Qwen3.6-30B-A3B)", model)
+		msg := fmt.Sprintf("spec.model %q is not a valid model reference (want org/name or name, e.g. Qwen/Qwen3-30B-A3B)", model)
 		c.event(mc, "Warning", apiv1alpha1.ReasonInvalidModel, msg)
 		return c.updateStatus(ctx, ns, name, func(status *apiv1alpha1.ModelClaimStatus) {
 			setCondition(status, mc.Generation, condResolved, metav1.ConditionFalse, apiv1alpha1.ReasonInvalidModel, msg)
