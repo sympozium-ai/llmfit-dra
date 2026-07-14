@@ -364,6 +364,35 @@ func addIBDevice(t *testing.T, sysRoot, ibdev, pciRoot, pciAddr, linkLayer, rate
 	}
 }
 
+// Azure MANA (GitHub Actions runners) registers multiple RDMA class
+// entries on ONE PCI function. They must collapse to one inventory device:
+// each would otherwise be named nic-<same-pciaddr> and the duplicate fails
+// pool validation, unpublishing every device on the node.
+func TestWalkInfinibandDedupesSamePCIFunction(t *testing.T) {
+	sysRoot, procRoot := buildFakeTree(t)
+	addIBDevice(t, sysRoot, "mana_0", "pci0000:78", "7870:00:00.0",
+		"Ethernet", "100 Gb/sec", "4: ACTIVE", "eth0", "uverbs0")
+	addIBDevice(t, sysRoot, "mana_1", "pci0000:78", "7870:00:00.0",
+		"Ethernet", "100 Gb/sec", "4: ACTIVE", "eth1", "uverbs1")
+
+	devices, err := New(sysRoot, procRoot).Walk()
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	var nics []Device
+	for _, d := range devices {
+		if d.Kind == KindNIC {
+			nics = append(nics, d)
+		}
+	}
+	if len(nics) != 1 {
+		t.Fatalf("one PCI function must probe as one NIC, got %d: %+v", len(nics), nics)
+	}
+	if nics[0].Name() != "nic-7870-00-00-0" {
+		t.Errorf("nic name = %q", nics[0].Name())
+	}
+}
+
 func TestWalkInfiniband(t *testing.T) {
 	sysRoot, procRoot := buildFakeTree(t)
 	addIBDevice(t, sysRoot, "mlx5_0", "pci0000:40", "0000:41:00.0",

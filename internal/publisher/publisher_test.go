@@ -39,6 +39,20 @@ func mustIndex(t *testing.T) *index.Index {
 	return idx
 }
 
+// A duplicate device name would fail validation for the WHOLE pool, so
+// BuildDevices must drop the duplicate rather than let one probe quirk
+// (e.g. Azure MANA's multi-entry NIC) unpublish the node's inventory.
+func TestBuildDevicesDropsDuplicateNames(t *testing.T) {
+	dup := probe.Device{Kind: probe.KindNIC, Index: 0, PCIVendor: "1414", PCIDevice: "00ba",
+		PCIAddr: "7870:00:00.0", Driver: "mana", IBLinkLayer: "ethernet", IBPortActive: true, DevNode: "/dev/infiniband/uverbs0"}
+	dup2 := dup
+	dup2.Index = 1
+	devices := BuildDevices([]probe.Device{dup, dup2}, mustIndex(t), systemRAM, nil, Options{})
+	if len(devices) != 1 {
+		t.Fatalf("duplicate names must collapse to one device, got %d", len(devices))
+	}
+}
+
 func TestBuildDevicesAttributeMapping(t *testing.T) {
 	devices := BuildDevices(testDevices(), mustIndex(t), systemRAM, nil, Options{})
 	if len(devices) != 5 {

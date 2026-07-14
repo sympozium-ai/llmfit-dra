@@ -75,6 +75,11 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 	}
 
 	out := make([]resourceapi.Device, 0, len(devices))
+	// Device names must be unique within the pool — the resourceslice
+	// library rejects the ENTIRE pool on a duplicate, so one probe quirk
+	// must not unpublish every device on the node. Keep the first, log the
+	// rest.
+	names := map[string]bool{}
 	for _, d := range devices {
 		healthy, reason := d.Healthy()
 		attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
@@ -244,6 +249,11 @@ func BuildDevices(devices []probe.Device, idx *index.Index, systemRAM uint64, sy
 			}
 		}
 
+		if names[d.Name()] {
+			klog.InfoS("skipping device with duplicate name", "name", d.Name(), "kind", d.Kind, "pciAddress", d.PCIAddr)
+			continue
+		}
+		names[d.Name()] = true
 		dev := resourceapi.Device{
 			Name:       d.Name(),
 			Attributes: attrs,

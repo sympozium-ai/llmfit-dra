@@ -286,6 +286,12 @@ func (p *Prober) walkInfiniband() ([]Device, error) {
 
 	var out []Device
 	idx := 0
+	// One PCI function must yield ONE inventory device. Azure MANA (the
+	// GitHub Actions runner fabric) registers multiple RDMA class entries
+	// on a single PCI function; without this dedupe they all name
+	// themselves nic-<pciaddr> and the duplicate poisons the whole
+	// ResourceSlice pool at publish validation.
+	seen := map[string]bool{}
 	for _, e := range entries {
 		devDir := filepath.Join(classDir, e.Name(), "device")
 		if _, err := os.Stat(devDir); err != nil {
@@ -305,6 +311,18 @@ func (p *Prober) walkInfiniband() ([]Device, error) {
 			DevNode:      uverbsNode(p.SysRoot, e.Name()),
 		}
 		d.PCIAddr, d.PCIeRoot = pciAddress(devDir)
+		key := d.PCIAddr
+		if key == "" {
+			if real, err := filepath.EvalSymlinks(devDir); err == nil {
+				key = real
+			}
+		}
+		if key != "" {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
 		out = append(out, d)
 		idx++
 	}
