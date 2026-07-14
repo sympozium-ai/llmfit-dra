@@ -9,8 +9,8 @@ type: application
 # open a release PR; merging it tags vX.Y.Z, which CI builds as the image
 # tag X.Y.Z that appVersion — and therefore the default image.tag — points
 # at).
-version: 0.3.1 # x-release-please-version
-appVersion: "0.3.1" # x-release-please-version
+version: 0.3.2 # x-release-please-version
+appVersion: "0.3.2" # x-release-please-version
 home: https://github.com/sympozium-ai/llmfit-dra
 sources:
   - https://github.com/sympozium-ai/llmfit-dra
