@@ -122,14 +122,14 @@ func countReason(reasons []string, want string) int {
 }
 
 func TestReconcileCreatesTemplate(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	c, dyn, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc)
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	tpl, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{})
+	tpl, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("template not created: %v", err)
 	}
@@ -146,10 +146,10 @@ func TestReconcileCreatesTemplate(t *testing.T) {
 		}
 	}
 
-	if s, r := condition(t, dyn, "team-a", "qwen36", condResolved); s != "True" || r != "Resolved" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condResolved); s != "True" || r != "Resolved" {
 		t.Errorf("Resolved = %s/%s, want True/Resolved", s, r)
 	}
-	fresh, err := dyn.Resource(GVR).Namespace("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{})
+	fresh, err := dyn.Resource(GVR).Namespace("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,19 +159,19 @@ func TestReconcileCreatesTemplate(t *testing.T) {
 }
 
 func TestReconcileResolveFailureRequeuesAndSetsConditions(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	c, dyn, cs := newTestController(t, &fakeResolver{err: errors.New("model DB unavailable")}, mc)
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err == nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err == nil {
 		t.Fatal("want error for rate-limited requeue on resolve failure")
 	}
-	if _, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{}); err == nil {
+	if _, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{}); err == nil {
 		t.Fatal("no template must be created on resolve failure")
 	}
-	if s, r := condition(t, dyn, "team-a", "qwen36", condResolved); s != "False" || r != "ResolveFailed" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condResolved); s != "False" || r != "ResolveFailed" {
 		t.Errorf("Resolved = %s/%s, want False/ResolveFailed", s, r)
 	}
-	if s, r := condition(t, dyn, "team-a", "qwen36", condSatisfiable); s != "Unknown" || r != "ResolveFailed" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condSatisfiable); s != "Unknown" || r != "ResolveFailed" {
 		t.Errorf("Satisfiable = %s/%s, want Unknown/ResolveFailed", s, r)
 	}
 }
@@ -181,24 +181,24 @@ func TestReconcileInvalidModelIsTerminal(t *testing.T) {
 	resolver := &fakeResolver{bounds: testBounds()}
 	c, dyn, cs := newTestController(t, resolver, mc)
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("invalid model is terminal, want nil (no requeue), got %v", err)
 	}
 	if resolver.calls != 0 {
 		t.Errorf("resolver must not run for an invalid model, ran %d times", resolver.calls)
 	}
-	if _, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{}); err == nil {
+	if _, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{}); err == nil {
 		t.Fatal("no template must be created for an invalid model")
 	}
-	if s, r := condition(t, dyn, "team-a", "qwen36", condResolved); s != "False" || r != "InvalidModel" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condResolved); s != "False" || r != "InvalidModel" {
 		t.Errorf("Resolved = %s/%s, want False/InvalidModel", s, r)
 	}
 }
 
 func TestReconcileRefusesForeignTemplate(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	foreign := &resourceapi.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "qwen36", Namespace: "team-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen3", Namespace: "team-a"},
 		Spec: resourceapi.ResourceClaimTemplateSpec{
 			Spec: resourceapi.ResourceClaimSpec{
 				Devices: resourceapi.DeviceClaim{
@@ -209,11 +209,11 @@ func TestReconcileRefusesForeignTemplate(t *testing.T) {
 	}
 	c, dyn, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc, foreign)
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("conflict is terminal, want nil (no requeue), got %v", err)
 	}
 
-	live, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{})
+	live, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("foreign template must not be deleted: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestReconcileRefusesForeignTemplate(t *testing.T) {
 	if len(live.Spec.Spec.Devices.Requests) != 1 || live.Spec.Spec.Devices.Requests[0].Name != "someone-elses" {
 		t.Errorf("foreign template spec was modified: %+v", live.Spec.Spec.Devices.Requests)
 	}
-	if s, r := condition(t, dyn, "team-a", "qwen36", condResolved); s != "False" || r != "TemplateConflict" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condResolved); s != "False" || r != "TemplateConflict" {
 		t.Errorf("Resolved = %s/%s, want False/TemplateConflict", s, r)
 	}
 	if countReason(eventReasons(cs), "TemplateConflict") != 1 {
@@ -232,18 +232,18 @@ func TestReconcileRefusesForeignTemplate(t *testing.T) {
 }
 
 func TestReconcileUpdatesOwnedTemplate(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	stale := testBounds()
 	stale.MinBandwidthGBs = 100
 	stale.MemoryGi = 12
 	owned := BuildTemplate(mc, stale, DriverDomain, nil)
 	c, _, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc, owned)
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	live, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{})
+	live, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,12 +262,12 @@ func TestReconcileUpdatesOwnedTemplate(t *testing.T) {
 }
 
 func TestResolveMemoized(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	resolver := &fakeResolver{bounds: testBounds()}
 	c, _, _ := newTestController(t, resolver, mc)
 
 	for i := 0; i < 2; i++ {
-		if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+		if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
 		}
 	}
@@ -277,14 +277,14 @@ func TestResolveMemoized(t *testing.T) {
 }
 
 func TestSatisfiableTransitionEmitsEventOnce(t *testing.T) {
-	mc := reconcileMC("Qwen/Qwen3.6-30B-A3B")
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
 	c, dyn, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc)
 	// One published device that misses the bandwidth floor (100 < 160).
 	if err := c.sliceInformer.GetStore().Add(slice("strix", device("gpu0", "gpu", 96, 100, true, false))); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
 	if got := countReason(eventReasons(cs), "NoCandidates"); got != 1 {
@@ -293,7 +293,7 @@ func TestSatisfiableTransitionEmitsEventOnce(t *testing.T) {
 
 	// Simulate the informer catching up with our own status write: reconcile
 	// reads the previous Satisfiable reason from the informer copy.
-	fresh, err := dyn.Resource(GVR).Namespace("team-a").Get(context.Background(), "qwen36", metav1.GetOptions{})
+	fresh, err := dyn.Resource(GVR).Namespace("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,13 +301,13 @@ func TestSatisfiableTransitionEmitsEventOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.reconcile(context.Background(), "team-a/qwen36"); err != nil {
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
 	if got := countReason(eventReasons(cs), "NoCandidates"); got != 1 {
 		t.Errorf("unchanged state must not re-emit NoCandidates, got %d events (%v)", got, eventReasons(cs))
 	}
-	if s, r := condition(t, dyn, "team-a", "qwen36", condSatisfiable); s != "False" || r != "NoCandidates" {
+	if s, r := condition(t, dyn, "team-a", "qwen3", condSatisfiable); s != "False" || r != "NoCandidates" {
 		t.Errorf("Satisfiable = %s/%s, want False/NoCandidates", s, r)
 	}
 }

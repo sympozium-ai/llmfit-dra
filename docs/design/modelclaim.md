@@ -27,9 +27,9 @@ validation, and no answer to "could this cluster *ever* run this model?".
 apiVersion: llmfit.ai/v1alpha1
 kind: ModelClaim
 metadata:
-  name: qwen36
+  name: qwen3
 spec:
-  model: Qwen/Qwen3.6-30B-A3B
+  model: Qwen/Qwen3-30B-A3B
   minTps: 20
 ```
 
@@ -39,7 +39,7 @@ spec:
 spec:
   resourceClaims:
     - name: model
-      resourceClaimTemplateName: qwen36   # ← same name, emitted by the controller
+      resourceClaimTemplateName: qwen3   # ← same name, emitted by the controller
 ```
 
 ## The constraint that shapes everything
@@ -82,12 +82,12 @@ rip-and-replace. One addition:
 apiVersion: llmfit.ai/v1alpha1
 kind: ModelClaim
 metadata:
-  name: qwen36
+  name: qwen3
   namespace: team-a
 spec:
   # Catalog name or HuggingFace repo id. Resolved against the llmfit model
   # database (embedded catalog + update cache + custom_models.json overlay).
-  model: Qwen/Qwen3.6-30B-A3B          # required
+  model: Qwen/Qwen3-30B-A3B          # required
 
   minTps: 20                            # optional, default 20; CEL: > 0
   quant: Q4_K_M                         # optional; default = catalog quant
@@ -110,7 +110,7 @@ status:
     weightsGb: "17.6"
     resolverVersion: "0.9.36"           # llmfit binary that computed this
   templateRef:
-    name: qwen36                        # always == metadata.name
+    name: qwen3                        # always == metadata.name
   candidates:                           # satisfiability snapshot
     devices: 2
     nodes: 1
@@ -224,7 +224,7 @@ llmfit claim <model> --min-tps N [--quant Q] [--efficiency E] --format json
 claim subcommand emitting `fit_bounds` + identity as JSON:
 
 ```json
-{"model": "Qwen/Qwen3.6-30B-A3B", "quant": "Q4_K_M", "weightsGb": 17.6,
+{"model": "Qwen/Qwen3-30B-A3B", "quant": "Q4_K_M", "weightsGb": 17.6,
  "memoryGi": 18, "minBandwidthGBs": 160, "claimName": "qwen-qwen3-6-30b-a3b-fit",
  "resolverVersion": "0.9.36"}
 ```

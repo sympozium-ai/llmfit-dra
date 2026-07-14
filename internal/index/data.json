@@ -45,6 +45,46 @@
     "memoryBandwidthGBs": 3350,
     "computeTFLOPS": 989
   },
+  "10de:2331": {
+    "model": "NVIDIA H100 PCIe 80GB",
+    "memoryBandwidthGBs": 2000,
+    "computeTFLOPS": 756
+  },
+  "10de:20b0": {
+    "model": "NVIDIA A100-SXM4-40GB",
+    "memoryBandwidthGBs": 1555,
+    "computeTFLOPS": 312
+  },
+  "10de:20b2": {
+    "model": "NVIDIA A100-SXM4-80GB",
+    "memoryBandwidthGBs": 2039,
+    "computeTFLOPS": 312
+  },
+  "10de:20f1": {
+    "model": "NVIDIA A100-PCIE-40GB",
+    "memoryBandwidthGBs": 1555,
+    "computeTFLOPS": 312
+  },
+  "10de:20b5": {
+    "model": "NVIDIA A100-PCIE-80GB",
+    "memoryBandwidthGBs": 1935,
+    "computeTFLOPS": 312
+  },
+  "10de:2236": {
+    "model": "NVIDIA A10",
+    "memoryBandwidthGBs": 600,
+    "computeTFLOPS": 125
+  },
+  "10de:27b8": {
+    "model": "NVIDIA L4",
+    "memoryBandwidthGBs": 300,
+    "computeTFLOPS": 121
+  },
+  "10de:1eb8": {
+    "model": "NVIDIA Tesla T4",
+    "memoryBandwidthGBs": 320,
+    "computeTFLOPS": 65
+  },
   "1002:744c": {
     "model": "AMD Radeon RX 7900 XTX",
     "memoryBandwidthGBs": 960,

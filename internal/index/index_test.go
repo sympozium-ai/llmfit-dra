@@ -32,6 +32,25 @@ func TestLookupKnown(t *testing.T) {
 	}
 }
 
+// The GPU from issue #38: a bandwidth-bounded claim on a T4 node must have
+// an index answer even when no llmfit transport is reachable.
+func TestLookupTeslaT4(t *testing.T) {
+	idx, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := idx.Lookup("10de", "1eb8")
+	if !ok {
+		t.Fatal("10de:1eb8 (Tesla T4) should be indexed")
+	}
+	if e.MemoryBandwidthGBs != 320 {
+		t.Errorf("bandwidth = %d, want 320", e.MemoryBandwidthGBs)
+	}
+	if e.UnifiedMemory {
+		t.Error("T4 is discrete; unifiedMemory should be false")
+	}
+}
+
 func TestLookupUnknown(t *testing.T) {
 	idx, err := Load()
 	if err != nil {

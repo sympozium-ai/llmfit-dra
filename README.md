@@ -15,16 +15,16 @@ kube-scheduler does the placement; the client never picks a node.</em></p>
 # "Run Qwen3.6 at ≥20 tok/s" — as a Kubernetes object.
 apiVersion: llmfit.ai/v1alpha1
 kind: ModelClaim
-metadata: { name: qwen36 }
+metadata: { name: qwen3 }
 spec:
-  model: Qwen/Qwen3.6-30B-A3B
+  model: Qwen/Qwen3-30B-A3B
   minTps: 20
 ```
 
 ```console
-$ kubectl get modelclaim qwen36
+$ kubectl get modelclaim qwen3
 NAME     MODEL                  MINTPS   RESOLVED   SATISFIABLE   DEVICES
-qwen36   Qwen/Qwen3.6-30B-A3B   20       True       True          2
+qwen3   Qwen/Qwen3-30B-A3B   20       True       True          2
 ```
 
 That's the value proposition in one object: you name the **model**, the
@@ -34,7 +34,7 @@ places your pod on silicon that can actually run it. **No other DRA
 driver can take this request** — they allocate by spec sheet (memory
 quantities, product names); llmfit-dra allocates by what the hardware
 can *do*. And when nothing fits, `kubectl describe modelclaim` says
-exactly why (`closest device gpu-…: bandwidth 256 < 640 GB/s`) — before
+exactly why (`closest device gpu-…: bandwidth 256 < 644 GB/s`) — before
 any pod exists.
 
 Kubernetes can allocate GPUs, but it has no idea whether a model *fits* one:
@@ -111,28 +111,28 @@ floor from llmfit's database and maintains a same-named
 ```yaml
 apiVersion: llmfit.ai/v1alpha1
 kind: ModelClaim
-metadata: { name: qwen36 }
+metadata: { name: qwen3 }
 spec:
-  model: Qwen/Qwen3.6-30B-A3B
+  model: Qwen/Qwen3-30B-A3B
   minTps: 20
 ```
 
 ```sh
-kubectl get modelclaim qwen36
+kubectl get modelclaim qwen3
 # NAME     MODEL                  MINTPS  RESOLVED  SATISFIABLE  DEVICES
-# qwen36   Qwen/Qwen3.6-30B-A3B   20      True      True         2
+# qwen3   Qwen/Qwen3-30B-A3B   20      True      True         2
 ```
 
 `kubectl describe` shows the resolved bounds (`memory>=18Gi,
-bandwidth>=160GB/s @ Q4_K_M`) and — when nothing fits — the exact
-shortfall (`closest device gpu-…: bandwidth 256 < 640 GB/s`), *before any
+bandwidth>=644GB/s @ Q4_K_M`) and — when nothing fits — the exact
+shortfall (`closest device gpu-…: bandwidth 256 < 644 GB/s`), *before any
 pod exists*. Reference it from any pod by the same name:
 
 ```yaml
 spec:
   resourceClaims:
     - name: model
-      resourceClaimTemplateName: qwen36   # == the ModelClaim's name
+      resourceClaimTemplateName: qwen3   # == the ModelClaim's name
   containers:
     - name: main
       resources:

@@ -67,6 +67,7 @@ func (d *Detector) Detect(ctx context.Context) (*System, error) {
 			klog.InfoS("llmfit capability transport", "transport", t.name)
 			d.transport = t.name
 		}
+		backfillBandwidth(sys, d.last)
 		d.last, d.lastAt = sys, time.Now()
 		d.mu.Unlock()
 		return sys, nil
@@ -85,6 +86,35 @@ func (d *Detector) Detect(ctx context.Context) (*System, error) {
 		firstErr = fmt.Errorf("no llmfit transport configured")
 	}
 	return nil, firstErr
+}
+
+// backfillBandwidth carries memory_bandwidth_gbps forward from the previous
+// reading when a fresh one omits it for the same GPU name. Transports can
+// report partial data — llmfit <1.1.3's REST API omitted the field that the
+// CLI included (AlexsJones/llmfit#747), so the exec→api handoff erased the
+// attribute from published ResourceSlices and flipped bandwidth-bounded
+// claims unsatisfiable (issue #38). Bandwidth is a physical constant of the
+// GPU model, so a name-keyed carry-forward can never serve wrong data, only
+// heal missing data. The merge is per-field on purpose: a source that wins
+// the transport preference must not clobber facts it does not know.
+func backfillBandwidth(fresh, prev *System) {
+	if fresh == nil || prev == nil {
+		return
+	}
+	byName := map[string]*float64{}
+	for i := range prev.GPUs {
+		if g := &prev.GPUs[i]; g.MemoryBandwidthGBps != nil && *g.MemoryBandwidthGBps > 0 {
+			byName[g.Name] = g.MemoryBandwidthGBps
+		}
+	}
+	for i := range fresh.GPUs {
+		g := &fresh.GPUs[i]
+		if g.MemoryBandwidthGBps == nil || *g.MemoryBandwidthGBps <= 0 {
+			if bw, ok := byName[g.Name]; ok {
+				g.MemoryBandwidthGBps = bw
+			}
+		}
+	}
 }
 
 // Transport reports the transport that served the most recent successful

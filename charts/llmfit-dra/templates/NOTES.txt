@@ -10,13 +10,13 @@ Ask for a model — the physics picks the device:
   kubectl apply -f - <<'EOF'
   apiVersion: llmfit.ai/v1alpha1
   kind: ModelClaim
-  metadata: { name: qwen36 }
-  spec: { model: Qwen/Qwen3.6-30B-A3B, minTps: 20 }
+  metadata: { name: qwen3 }
+  spec: { model: Qwen/Qwen3-30B-A3B, minTps: 20 }
   EOF
-  kubectl get modelclaim qwen36     # RESOLVED / SATISFIABLE / DEVICES
+  kubectl get modelclaim qwen3     # RESOLVED / SATISFIABLE / DEVICES
 
-Reference it from any pod with `resourceClaimTemplateName: qwen36` (same
-name). `kubectl describe modelclaim qwen36` explains the fit — or the
+Reference it from any pod with `resourceClaimTemplateName: qwen3` (same
+name). `kubectl describe modelclaim qwen3` explains the fit — or the
 exact shortfall when nothing satisfies it.
 
 The imperative equivalent (no controller involved; the llmfit binary
