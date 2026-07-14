@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.2](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.1...v0.3.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* per-field capability continuity, vendorManaged shortfall, NOTES model ([4ae5895](https://github.com/sympozium-ai/llmfit-dra/commit/4ae5895ad4eb0f16935dadc3f3af834e8040d3c7))
+* **probe:** dedupe RDMA entries sharing one PCI function (MANA) — pool-poisoning duplicate NIC ([6a1f486](https://github.com/sympozium-ai/llmfit-dra/commit/6a1f486af0a456eb0625d8624eb20de4a83859d0))
+* **probe:** one PCI function must probe as one NIC ([14ace16](https://github.com/sympozium-ai/llmfit-dra/commit/14ace160d5dc1cdfeb2a0a06b4f0ee31e9345c8d))
+* T4 testing fallout — capability continuity, vendorManaged diagnostics, quickstart model ([52a6f4f](https://github.com/sympozium-ai/llmfit-dra/commit/52a6f4fc1780f2a0b5569c197fb4f4425f48b16c))
+
 ## [0.3.1](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.0...v0.3.1) (2026-07-09)
 
 
