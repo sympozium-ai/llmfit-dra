@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.2...v0.3.3) (2026-07-22)
+
+
+### Features
+
+* **modelclaim:** NVIDIA/MIG translation backend ([20a1e9a](https://github.com/sympozium-ai/llmfit-dra/commit/20a1e9a8d8c300e09bbe0e3875b7e854ec5dfec2))
+
 ## [0.3.2](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.1...v0.3.2) (2026-07-14)
 
 
