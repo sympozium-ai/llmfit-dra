@@ -31,6 +31,7 @@ class and any CEL you add.
 | [`07-disaggregated-prefill-decode.yaml`](07-disaggregated-prefill-decode.yaml) | **a prefill pool and a decode pool**, each by its role's physics | multi-node fleets |
 | [`08-llamacpp-proof-of-work.yaml`](08-llamacpp-proof-of-work.yaml) | **a real model served on the claimed silicon** (llama.cpp Vulkan) | GPU nodes — the full proof |
 | [`10-gpu-plus-nic-aligned.yaml`](10-gpu-plus-nic-aligned.yaml) | a GPU **and** an RDMA NIC on the same PCIe root (GPUDirect-correct) | nodes with an RDMA HCA |
+| [`11-nvidia-mig-modelclaim.yaml`](11-nvidia-mig-modelclaim.yaml) | **a MIG slice big enough for the model** (ModelClaim → NVIDIA translation backend) | NVIDIA DRA driver + static MIG |
 
 **`00-modelclaim.yaml` is the intended way in** — name the model, let the
 physics pick the device:

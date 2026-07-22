@@ -283,12 +283,61 @@ robustness advantage over the mutating-webhook design.
   scope for v1alpha1. Where model-level quota matters, the curated
   flagship classes (Option A residue) remain the mechanism; a ModelClaim
   can target one via `spec.deviceClassName`.
-- **Vendor coexistence:** unchanged — the emitted CEL selects only
-  llmfit.ai devices; `vendorManaged` demotion applies as today.
+- **Vendor coexistence:** for llmfit.ai classes, unchanged — the emitted
+  CEL selects only llmfit.ai devices; `vendorManaged` demotion applies as
+  today. NVIDIA classes select the translation backend below instead.
 - **VAP:** the existing ValidatingAdmissionPolicy pins ResourceSlice writes
   to each node's driver; the controller writes no slices. Consider a
   follow-up VAP restricting who may create ModelClaims if clusters want
   policy there.
+
+## The NVIDIA translation backend (added 2026-07-22)
+
+The Motivation section calls spec-sheet selection — a memory quantity, a
+product name, a MIG profile — the thing ModelClaim exists to replace. That
+critique is about *requesting by profile name*; the stronger version of the
+same argument is **requesting by fit and resolving to a profile**, and that
+is exactly what the NVIDIA backend does. `spec.deviceClassName:
+mig.nvidia.com` (or `gpu.nvidia.com`; custom classes opt in via
+`spec.targetDriver: gpu.nvidia.com`) switches the CEL compiler: the resolved
+bounds are emitted against `gpu.nvidia.com` attributes instead of ours.
+
+Mechanics, and why it is shaped this way:
+
+- **No NVML, no probing.** MIG partitions are not PCI/DRM devices — the
+  probe cannot see them, and adding NVML would put a vendor userspace in the
+  node agent. Inventory comes from the NVIDIA driver's own ResourceSlices;
+  llmfit-dra is compiler and evaluator only, never in the prepare path.
+- **No cross-driver `matchAttribute` companion.** `pcieRoot` is
+  root-complex-granular (readiness audit), so a companion claim cannot pin
+  "same silicon" on dense nodes. The generated request simply *is* an
+  NVIDIA-class request — nothing to correlate.
+- **Capacity thresholds, not profile allowlists.** NVIDIA publishes
+  `productName`, `profile`, and `memory`/`multiprocessors` capacity for MIG
+  devices — but no bandwidth. Derived slice bandwidth = board peak ×
+  memory-slice fraction (each MIG memory slice carries dedicated capacity
+  *and* bandwidth per the MIG User Guide — llmfit's DERIVED model, not an
+  NVIDIA-published spec, and every diagnostic says "derived"). Since that
+  fraction is proportional to published memory, both floors collapse into
+  one per-board memory threshold, placed at the midpoint between the
+  last-rejected and first-admitted slice count — robust to the ~2-5%
+  reserved-VRAM skew, and automatically correct for `+me` variants,
+  `1g.20gb`-style profiles, and A30's 4-slice geometry. The compute floor
+  becomes a `multiprocessors` threshold via SM fraction.
+- **Board table** (`internal/index/nvidia_boards.json`, keyed by exact
+  `productName` — MIG devices share the parent's PCI ID, so PCI keying
+  cannot work): nominal memory, peak bandwidth, TFLOPS, SM count, memory
+  slices. Unknown boards **fail closed** and the Satisfiable shortfall names
+  them plus the table version; the template carries a
+  `llmfit.ai/nvidia-boards-version` content-hash annotation so shipping new
+  board data re-renders every NVIDIA-target template. productName strings
+  vary by SKU and driver generation — verify against live slice dumps
+  before extending the table.
+- **Scope:** static pre-partitioned MIG on GA DRA (k8s ≥ 1.34), single
+  `Exactly` request — DRA 1.34 has no allocator scoring, so a claim may land
+  on a 7g.80gb where a 3g.40gb would do. Future work: `firstAvailable`
+  banding for smallest-fitting-profile preference, and dynamic MIG once
+  NVIDIA ships it (their #361, KEP-4815, beta in k8s 1.36).
 
 ## Testing
 

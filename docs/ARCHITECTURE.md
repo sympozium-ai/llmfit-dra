@@ -215,6 +215,26 @@ fitness companion via `matchAttribute`.
                                           ─▶ our GPU is fitness-only; NVIDIA owns allocation
 ```
 
+**The NVIDIA translation backend.** Fitness-only is not fit-less: a
+ModelClaim naming one of NVIDIA's DeviceClasses (`mig.nvidia.com` /
+`gpu.nvidia.com`, or a custom class plus `spec.targetDriver`) makes the
+controller compile the same resolved physics into CEL over the *NVIDIA*
+driver's attributes — NVIDIA owns allocation and node prepare; llmfit owns
+the model→physics translation. MIG partitions are the payoff: they are
+invisible to our probe (not PCI/DRM devices) and NVIDIA publishes no
+bandwidth attribute for them, but derived slice bandwidth is proportional to
+the published `memory` capacity (each MIG memory slice carries dedicated
+capacity *and* bandwidth), so both floors collapse into one per-board
+capacity threshold from the embedded board table
+(`internal/index/nvidia_boards.json`, keyed by `productName`). Unknown
+boards fail closed; the Satisfiable condition evaluates `gpu.nvidia.com`
+slices and labels every bandwidth number "derived" — it is llmfit's model,
+not an NVIDIA spec. Pods on this path get NVIDIA's CDI injection
+(`NVIDIA_VISIBLE_DEVICES`), not `LLMFIT_*`. Static pre-partitioned MIG only
+for now; dynamic MIG (KEP-4815 partitionable devices, NVIDIA #361) is
+future work, as is `firstAvailable` banding for smallest-fitting-profile
+preference.
+
 ## Health and hotplug
 
 `healthy` is computed each probe cycle from facts: a device with no bound

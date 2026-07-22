@@ -1,0 +1,96 @@
+{
+  "NVIDIA A100-SXM4-40GB": {
+    "memoryMiB": 40960,
+    "memoryBandwidthGBs": 1555,
+    "computeTFLOPS": 312,
+    "smCount": 108,
+    "memorySlices": 8
+  },
+  "NVIDIA A100-SXM4-80GB": {
+    "memoryMiB": 81920,
+    "memoryBandwidthGBs": 2039,
+    "computeTFLOPS": 312,
+    "smCount": 108,
+    "memorySlices": 8
+  },
+  "NVIDIA A100-PCIE-40GB": {
+    "memoryMiB": 40960,
+    "memoryBandwidthGBs": 1555,
+    "computeTFLOPS": 312,
+    "smCount": 108,
+    "memorySlices": 8
+  },
+  "NVIDIA A100 80GB PCIe": {
+    "memoryMiB": 81920,
+    "memoryBandwidthGBs": 1935,
+    "computeTFLOPS": 312,
+    "smCount": 108,
+    "memorySlices": 8
+  },
+  "NVIDIA A100-PCIE-80GB": {
+    "memoryMiB": 81920,
+    "memoryBandwidthGBs": 1935,
+    "computeTFLOPS": 312,
+    "smCount": 108,
+    "memorySlices": 8
+  },
+  "NVIDIA A30": {
+    "memoryMiB": 24576,
+    "memoryBandwidthGBs": 933,
+    "computeTFLOPS": 165,
+    "smCount": 56,
+    "memorySlices": 4
+  },
+  "NVIDIA H100 80GB HBM3": {
+    "memoryMiB": 81920,
+    "memoryBandwidthGBs": 3350,
+    "computeTFLOPS": 989,
+    "smCount": 132,
+    "memorySlices": 8
+  },
+  "NVIDIA H100 PCIe": {
+    "memoryMiB": 81920,
+    "memoryBandwidthGBs": 2000,
+    "computeTFLOPS": 756,
+    "smCount": 114,
+    "memorySlices": 8
+  },
+  "NVIDIA H100 NVL": {
+    "memoryMiB": 96256,
+    "memoryBandwidthGBs": 3900,
+    "computeTFLOPS": 835,
+    "smCount": 132,
+    "memorySlices": 8
+  },
+  "NVIDIA H200": {
+    "memoryMiB": 144384,
+    "memoryBandwidthGBs": 4800,
+    "computeTFLOPS": 989,
+    "smCount": 132,
+    "memorySlices": 8
+  },
+  "NVIDIA A10": {
+    "memoryMiB": 24576,
+    "memoryBandwidthGBs": 600,
+    "computeTFLOPS": 125,
+    "smCount": 72
+  },
+  "NVIDIA L4": {
+    "memoryMiB": 24576,
+    "memoryBandwidthGBs": 300,
+    "computeTFLOPS": 121,
+    "smCount": 58
+  },
+  "NVIDIA L40S": {
+    "memoryMiB": 49152,
+    "memoryBandwidthGBs": 864,
+    "computeTFLOPS": 366,
+    "smCount": 142
+  },
+  "Tesla T4": {
+    "memoryMiB": 16384,
+    "memoryBandwidthGBs": 320,
+    "computeTFLOPS": 65,
+    "smCount": 40
+  }
+}

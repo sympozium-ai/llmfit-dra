@@ -27,21 +27,39 @@ type Candidates struct {
 }
 
 // AllocatedDevices maps "pool/device" keys held by allocated ResourceClaims
-// for this driver to their holder ("namespace/name").
-func AllocatedDevices(claims []*resourceapi.ResourceClaim) map[string]string {
+// for the given driver to their holder ("namespace/name").
+func AllocatedDevices(claims []*resourceapi.ResourceClaim, driver string) map[string]string {
 	held := map[string]string{}
 	for _, rc := range claims {
 		if rc.Status.Allocation == nil {
 			continue
 		}
 		for _, r := range rc.Status.Allocation.Devices.Results {
-			if r.Driver != DriverDomain {
+			if r.Driver != driver {
 				continue
 			}
 			held[r.Pool+"/"+r.Device] = rc.Namespace + "/" + rc.Name
 		}
 	}
 	return held
+}
+
+// currentPoolGens maps pool name to its highest observed generation for one
+// driver's slices. DRA contract: only slices from a pool's highest
+// generation are current — during a pool update the informer transiently
+// holds old+new slices for the same pool, and counting both double-counts
+// every device.
+func currentPoolGens(slices []*resourceapi.ResourceSlice, driver string) map[string]int64 {
+	maxGen := map[string]int64{}
+	for _, slice := range slices {
+		if slice.Spec.Driver != driver {
+			continue
+		}
+		if g := slice.Spec.Pool.Generation; g > maxGen[slice.Spec.Pool.Name] {
+			maxGen[slice.Spec.Pool.Name] = g
+		}
+	}
+	return maxGen
 }
 
 // kindForClass mirrors the shipped DeviceClass selectors: the kind classes
@@ -72,18 +90,7 @@ func EvaluateSlices(slices []*resourceapi.ResourceSlice, allocated map[string]st
 	// floor is NOT waived — it is itself an explicit opt-in.
 	bwRequired := deviceClassName != "cpu."+DriverDomain
 
-	// DRA contract: only slices from a pool's highest generation are current.
-	// During a pool update the informer transiently holds old+new slices for
-	// the same pool — counting both double-counts every device.
-	maxGen := map[string]int64{}
-	for _, slice := range slices {
-		if slice.Spec.Driver != DriverDomain {
-			continue
-		}
-		if g := slice.Spec.Pool.Generation; g > maxGen[slice.Spec.Pool.Name] {
-			maxGen[slice.Spec.Pool.Name] = g
-		}
-	}
+	maxGen := currentPoolGens(slices, DriverDomain)
 
 	nodes := map[string]bool{}
 	devices := 0

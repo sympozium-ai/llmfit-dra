@@ -123,6 +123,19 @@ spec:
               quant:
                 description: Quantization override (default = catalog quant).
                 type: string
+              targetDriver:
+                description: |-
+                  TargetDriver selects which DRA driver's devices the emitted fit CEL
+                  reads. Defaults by DeviceClass name: the NVIDIA classes
+                  (gpu.nvidia.com / mig.nvidia.com) imply gpu.nvidia.com; everything else
+                  implies llmfit.ai. Set explicitly only with a custom DeviceClass that
+                  selects NVIDIA-driver devices. On the NVIDIA target, per-MIG-slice
+                  bandwidth is llmfit's DERIVED model (board peak × memory-slice
+                  fraction) — NVIDIA publishes no per-profile bandwidth.
+                enum:
+                - llmfit.ai
+                - gpu.nvidia.com
+                type: string
             required:
             - model
             type: object

@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
+	"github.com/sympozium-ai/llmfit-dra/internal/index"
 	"github.com/sympozium-ai/llmfit-dra/internal/observe"
 )
 
@@ -59,6 +60,7 @@ type Controller struct {
 	dyn      dynamic.Interface
 	client   kubernetes.Interface
 	resolver Resolver
+	boards   *index.NvidiaBoards
 	queue    workqueue.TypedRateLimitingInterface[string]
 
 	mcInformer    cache.SharedIndexInformer
@@ -90,11 +92,12 @@ type resolveEntry struct {
 
 const resolveCacheTTL = 10 * time.Minute
 
-func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) *Controller {
+func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver, boards *index.NvidiaBoards) *Controller {
 	c := &Controller{
 		dyn:      dyn,
 		client:   client,
 		resolver: resolver,
+		boards:   boards,
 		queue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.DefaultTypedControllerRateLimiter[string]()),
 		resolveCache: map[string]resolveEntry{},
@@ -110,44 +113,53 @@ func New(dyn dynamic.Interface, client kubernetes.Interface, resolver Resolver) 
 	})
 
 	// ResourceSlice changes refresh Satisfiable for every claim (cheap: the
-	// resync is a static evaluation over cached slices). Only OUR slices —
-	// every other driver's churn is noise here.
+	// resync is a static evaluation over cached slices). Only slices of a
+	// driver some ModelClaim actually targets — every other driver's churn is
+	// noise here. gpu.nvidia.com is relevant only while a cached ModelClaim
+	// targets the NVIDIA backend, which bounds fan-out from NVIDIA's per-pod
+	// claim traffic on clusters that never use it.
 	factory := informers.NewSharedInformerFactory(client, 10*time.Minute)
 	c.sliceInformer = factory.Resource().V1().ResourceSlices().Informer()
 	c.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { c.enqueueAllIf(ownSlice(obj)) },
-		UpdateFunc: func(old, obj any) { c.enqueueAllIf(ownSlice(old) || ownSlice(obj)) },
-		DeleteFunc: func(obj any) { c.enqueueAllIf(ownSlice(obj)) },
+		AddFunc:    func(obj any) { c.enqueueAllIf(c.sliceRelevant(obj)) },
+		UpdateFunc: func(old, obj any) { c.enqueueAllIf(c.sliceRelevant(old) || c.sliceRelevant(obj)) },
+		DeleteFunc: func(obj any) { c.enqueueAllIf(c.sliceRelevant(obj)) },
 	})
 
 	// ResourceClaim allocations move devices between held and available, so
 	// they refresh Satisfiable's availability numbers too (issue #21). Only
-	// claims that hold (or held) one of our devices matter — per-pod claim
-	// churn from other drivers must not fan out to every ModelClaim.
+	// claims that hold (or held) a relevant driver's device matter — per-pod
+	// claim churn from other drivers must not fan out to every ModelClaim.
 	c.claimInformer = factory.Resource().V1().ResourceClaims().Informer()
 	c.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj any) { c.enqueueAllIf(holdsOurDevice(obj)) },
-		UpdateFunc: func(old, obj any) { c.enqueueAllIf(holdsOurDevice(old) || holdsOurDevice(obj)) },
-		DeleteFunc: func(obj any) { c.enqueueAllIf(holdsOurDevice(obj)) },
+		AddFunc:    func(obj any) { c.enqueueAllIf(c.claimRelevant(obj)) },
+		UpdateFunc: func(old, obj any) { c.enqueueAllIf(c.claimRelevant(old) || c.claimRelevant(obj)) },
+		DeleteFunc: func(obj any) { c.enqueueAllIf(c.claimRelevant(obj)) },
 	})
 
 	return c
 }
 
-// ownSlice reports whether the informer object is one of this driver's
-// ResourceSlices (tombstone-safe).
-func ownSlice(obj any) bool {
+// sliceRelevant reports whether the informer object is a ResourceSlice from
+// a driver some cached ModelClaim targets (tombstone-safe).
+func (c *Controller) sliceRelevant(obj any) bool {
 	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = t.Obj
 	}
 	s, ok := obj.(*resourceapi.ResourceSlice)
-	return ok && s.Spec.Driver == DriverDomain
+	if !ok {
+		return false
+	}
+	if s.Spec.Driver == DriverDomain {
+		return true
+	}
+	return s.Spec.Driver == NvidiaDriverDomain && c.nvidiaTargetsPresent()
 }
 
-// holdsOurDevice reports whether the claim's allocation includes one of this
-// driver's devices (tombstone-safe). Unallocated claims are irrelevant to
+// claimRelevant reports whether the claim's allocation includes a relevant
+// driver's device (tombstone-safe). Unallocated claims are irrelevant to
 // Satisfiable's availability numbers.
-func holdsOurDevice(obj any) bool {
+func (c *Controller) claimRelevant(obj any) bool {
 	if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = t.Obj
 	}
@@ -157,6 +169,28 @@ func holdsOurDevice(obj any) bool {
 	}
 	for _, r := range rc.Status.Allocation.Devices.Results {
 		if r.Driver == DriverDomain {
+			return true
+		}
+		if r.Driver == NvidiaDriverDomain && c.nvidiaTargetsPresent() {
+			return true
+		}
+	}
+	return false
+}
+
+// nvidiaTargetsPresent reports whether any cached ModelClaim selects the
+// NVIDIA backend. A cheap store scan (ModelClaims are few); the gate that
+// keeps NVIDIA's per-pod claim churn from fanning out on clusters where no
+// claim targets it.
+func (c *Controller) nvidiaTargetsPresent() bool {
+	for _, obj := range c.mcInformer.GetStore().List() {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+		class, _, _ := unstructured.NestedString(u.Object, "spec", "deviceClassName")
+		target, _, _ := unstructured.NestedString(u.Object, "spec", "targetDriver")
+		if backendFor(class, target) == backendNvidia {
 			return true
 		}
 	}
@@ -319,7 +353,11 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	// ── Reconcile the same-named ResourceClaimTemplate ─────────────────
-	desired := BuildTemplate(mc, bounds, deviceClass, extraSelectors)
+	desired := BuildTemplate(mc, bounds, deviceClass, extraSelectors, c.boards)
+	targetNote := ""
+	if backendFor(deviceClass, mc.Spec.TargetDriver) == backendNvidia {
+		targetNote = ", target gpu.nvidia.com (derived-bandwidth model)"
+	}
 	templates := c.client.ResourceV1().ResourceClaimTemplates(ns)
 	live, err := templates.Get(ctx, name, metav1.GetOptions{})
 	switch {
@@ -328,8 +366,8 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 			return fmt.Errorf("creating template: %w", err)
 		}
 		c.event(mc, "Normal", "TemplateCreated",
-			fmt.Sprintf("ResourceClaimTemplate %s: memory>=%dGi, bandwidth>=%dGB/s (%s)",
-				name, bounds.MemoryGi, bounds.MinBandwidthGBs, bounds.Quant))
+			fmt.Sprintf("ResourceClaimTemplate %s: memory>=%dGi, bandwidth>=%dGB/s (%s)%s",
+				name, bounds.MemoryGi, bounds.MinBandwidthGBs, bounds.Quant, targetNote))
 	case err != nil:
 		return fmt.Errorf("getting template: %w", err)
 	case !metav1.IsControlledBy(live, mc):
@@ -371,7 +409,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	// ── Satisfiability (advisory) ──────────────────────────────────────
-	cands := c.evaluateCandidates(bounds, deviceClass, computeFloor(mc))
+	cands := c.evaluateCandidates(bounds, deviceClass, computeFloor(mc), mc.Spec.TargetDriver)
 	satStatus, satReason, satMsg := satisfiableCondition(cands)
 
 	// Events on TRANSITIONS only: `kubectl get events -w` during a rollout
@@ -471,7 +509,7 @@ func (c *Controller) resolve(ctx context.Context, model string, minTps float64, 
 	return bounds, nil
 }
 
-func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string, minComputeTFLOPS int64) Candidates {
+func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string, minComputeTFLOPS int64, targetDriver string) Candidates {
 	var slices []*resourceapi.ResourceSlice
 	for _, obj := range c.sliceInformer.GetStore().List() {
 		if s, ok := obj.(*resourceapi.ResourceSlice); ok {
@@ -484,7 +522,10 @@ func (c *Controller) evaluateCandidates(b *Bounds, deviceClass string, minComput
 			claims = append(claims, rc)
 		}
 	}
-	return EvaluateSlices(slices, AllocatedDevices(claims), b, deviceClass, minComputeTFLOPS)
+	if backendFor(deviceClass, targetDriver) == backendNvidia {
+		return EvaluateNvidiaSlices(slices, AllocatedDevices(claims, NvidiaDriverDomain), b, deviceClass, minComputeTFLOPS, c.boards)
+	}
+	return EvaluateSlices(slices, AllocatedDevices(claims, DriverDomain), b, deviceClass, minComputeTFLOPS)
 }
 
 // updateStatus mutates .status via the status subresource with a fresh GET

@@ -18,6 +18,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
+	"github.com/sympozium-ai/llmfit-dra/internal/index"
 )
 
 // fakeResolver returns canned bounds (or a canned error) and counts calls, so
@@ -57,6 +58,17 @@ func mustUnstructured(t *testing.T, mc *apiv1alpha1.ModelClaim) *unstructured.Un
 	return &unstructured.Unstructured{Object: obj}
 }
 
+// testBoards loads the embedded NVIDIA board table — real data, so tests
+// exercise the same table production ships.
+func testBoards(t *testing.T) *index.NvidiaBoards {
+	t.Helper()
+	boards, err := index.LoadNvidiaBoards()
+	if err != nil {
+		t.Fatalf("loading nvidia boards: %v", err)
+	}
+	return boards
+}
+
 // newTestController wires a Controller against fake clients and injects the
 // ModelClaim into both the dynamic tracker (updateStatus does a fresh GET)
 // and the informer store (reconcile reads from it) — as unstructured, the
@@ -68,7 +80,7 @@ func newTestController(t *testing.T, r Resolver, mc *apiv1alpha1.ModelClaim, k8s
 	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
 		map[schema.GroupVersionResource]string{GVR: "ModelClaimList"}, u)
 	cs := k8sfake.NewClientset(k8sObjs...)
-	c := New(dyn, cs, r)
+	c := New(dyn, cs, r, testBoards(t))
 	if err := c.mcInformer.GetStore().Add(u); err != nil {
 		t.Fatalf("seeding informer store: %v", err)
 	}
@@ -236,7 +248,7 @@ func TestReconcileUpdatesOwnedTemplate(t *testing.T) {
 	stale := testBounds()
 	stale.MinBandwidthGBs = 100
 	stale.MemoryGi = 12
-	owned := BuildTemplate(mc, stale, DriverDomain, nil)
+	owned := BuildTemplate(mc, stale, DriverDomain, nil, nil)
 	c, _, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc, owned)
 
 	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
@@ -328,5 +340,69 @@ func TestLabelValueTruncation(t *testing.T) {
 	}
 	if last := got[len(got)-1]; last == '-' || last == '_' || last == '.' {
 		t.Errorf("labelValue must not end in a separator: %q", got)
+	}
+}
+
+func TestReconcileNvidiaTarget(t *testing.T) {
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
+	mc.Spec.DeviceClassName = "mig.nvidia.com"
+	c, _, cs := newTestController(t, &fakeResolver{bounds: testBounds()}, mc)
+
+	if err := c.reconcile(context.Background(), "team-a/qwen3"); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	tpl, err := cs.ResourceV1().ResourceClaimTemplates("team-a").Get(context.Background(), "qwen3", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("template not created: %v", err)
+	}
+	expr := tpl.Spec.Spec.Devices.Requests[0].Exactly.Selectors[0].CEL.Expression
+	if !strings.Contains(expr, "device.attributes['gpu.nvidia.com']") {
+		t.Errorf("NVIDIA-target template must compile against gpu.nvidia.com:\n%s", expr)
+	}
+	if tpl.Spec.Spec.Devices.Requests[0].Exactly.DeviceClassName != "mig.nvidia.com" {
+		t.Errorf("deviceClassName = %s", tpl.Spec.Spec.Devices.Requests[0].Exactly.DeviceClassName)
+	}
+	if tpl.Annotations["llmfit.ai/target-driver"] != NvidiaDriverDomain {
+		t.Errorf("target-driver annotation = %q", tpl.Annotations["llmfit.ai/target-driver"])
+	}
+	if tpl.Annotations["llmfit.ai/nvidia-boards-version"] == "" {
+		t.Error("boards-version annotation missing on NVIDIA-target template")
+	}
+
+	// No NVIDIA slices in the informer: Satisfiable must go False with the
+	// install hint, not crash or count llmfit devices.
+	_, reason := condition(t, mustDyn(t, c), "team-a", "qwen3", condSatisfiable)
+	if reason != apiv1alpha1.ReasonNoCandidates {
+		t.Errorf("Satisfiable reason = %s, want NoCandidates", reason)
+	}
+}
+
+// mustDyn extracts the fake dynamic client back out of the controller for
+// status assertions.
+func mustDyn(t *testing.T, c *Controller) *dynfake.FakeDynamicClient {
+	t.Helper()
+	dyn, ok := c.dyn.(*dynfake.FakeDynamicClient)
+	if !ok {
+		t.Fatal("controller not built on the fake dynamic client")
+	}
+	return dyn
+}
+
+func TestNvidiaTargetsPresent(t *testing.T) {
+	mc := reconcileMC("Qwen/Qwen3-30B-A3B")
+	c, _, _ := newTestController(t, &fakeResolver{bounds: testBounds()}, mc)
+	if c.nvidiaTargetsPresent() {
+		t.Error("llmfit-class claim must not flag nvidia targets")
+	}
+
+	nvMC := reconcileMC("Qwen/Qwen3-30B-A3B")
+	nvMC.Name = "qwen3-nv"
+	nvMC.Spec.DeviceClassName = "mig.nvidia.com"
+	if err := c.mcInformer.GetStore().Add(mustUnstructured(t, nvMC)); err != nil {
+		t.Fatalf("seeding informer store: %v", err)
+	}
+	if !c.nvidiaTargetsPresent() {
+		t.Error("nvidia-class claim must flag nvidia targets (slice/claim gating rides on this)")
 	}
 }

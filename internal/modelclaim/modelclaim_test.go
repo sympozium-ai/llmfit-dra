@@ -80,7 +80,7 @@ func testMC() *apiv1alpha1.ModelClaim {
 }
 
 func TestBuildTemplateShape(t *testing.T) {
-	tpl := BuildTemplate(testMC(), testBounds(), "gpu.llmfit.ai", []string{"device.attributes['llmfit.ai'].unifiedMemory"})
+	tpl := BuildTemplate(testMC(), testBounds(), "gpu.llmfit.ai", []string{"device.attributes['llmfit.ai'].unifiedMemory"}, nil)
 
 	if tpl.Name != "qwen3" || tpl.Namespace != "team-a" {
 		t.Fatalf("template must share the ModelClaim's name/namespace, got %s/%s", tpl.Namespace, tpl.Name)
@@ -111,14 +111,14 @@ func TestBuildTemplateShape(t *testing.T) {
 }
 
 func TestTemplateNeedsUpdate(t *testing.T) {
-	desired := BuildTemplate(testMC(), testBounds(), "llmfit.ai", nil)
-	same := BuildTemplate(testMC(), testBounds(), "llmfit.ai", nil)
+	desired := BuildTemplate(testMC(), testBounds(), "llmfit.ai", nil, nil)
+	same := BuildTemplate(testMC(), testBounds(), "llmfit.ai", nil, nil)
 	if TemplateNeedsUpdate(same, desired) {
 		t.Error("identical templates must not need update")
 	}
 	changed := testBounds()
 	changed.MinBandwidthGBs = 640
-	if !TemplateNeedsUpdate(BuildTemplate(testMC(), changed, "llmfit.ai", nil), desired) {
+	if !TemplateNeedsUpdate(BuildTemplate(testMC(), changed, "llmfit.ai", nil, nil), desired) {
 		t.Error("bandwidth change must need update")
 	}
 }
@@ -303,7 +303,7 @@ func TestAllocatedDevices(t *testing.T) {
 			},
 		},
 	}
-	held := AllocatedDevices([]*resourceapi.ResourceClaim{rc, {}})
+	held := AllocatedDevices([]*resourceapi.ResourceClaim{rc, {}}, DriverDomain)
 	if len(held) != 1 || held["node-a/gpu0"] != "default/demo" {
 		t.Fatalf("want only our driver's device held, got %v", held)
 	}
@@ -386,12 +386,12 @@ func TestFitCELComputeFloor(t *testing.T) {
 func TestBuildTemplateComputeFloor(t *testing.T) {
 	mc := testMC()
 	mc.Spec.MinComputeTFLOPS = ptr.To(int64(120))
-	tpl := BuildTemplate(mc, testBounds(), DriverDomain, nil)
+	tpl := BuildTemplate(mc, testBounds(), DriverDomain, nil, nil)
 	if !strings.Contains(tpl.Spec.Spec.Devices.Requests[0].Exactly.Selectors[0].CEL.Expression, "computeTFLOPS >= 120") {
 		t.Error("compute floor not rendered into the template CEL")
 	}
 	// A floor change must churn the template like any bounds change.
-	if !TemplateNeedsUpdate(BuildTemplate(testMC(), testBounds(), DriverDomain, nil), tpl) {
+	if !TemplateNeedsUpdate(BuildTemplate(testMC(), testBounds(), DriverDomain, nil, nil), tpl) {
 		t.Error("adding a compute floor must need a template update")
 	}
 }

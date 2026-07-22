@@ -1,0 +1,52 @@
+# Request a MIG slice by MODEL, not by profile. Naming mig.nvidia.com as the
+# DeviceClass selects the NVIDIA translation backend: the controller compiles
+# the model's physics into CEL over the NVIDIA DRA driver's device attributes
+# (productName + memory capacity), and the scheduler picks any MIG partition
+# big enough — "request by fit, resolve to a profile". llmfit-dra never
+# prepares these devices; NVIDIA's kubelet plugin injects its own CDI spec
+# (NVIDIA_VISIBLE_DEVICES etc. — no LLMFIT_* env on this path).
+#
+# Prerequisites:
+#   - NVIDIA k8s-dra-driver-gpu >= v25.3 installed with its DeviceClasses
+#     (gpu.nvidia.com / mig.nvidia.com)
+#   - MIG statically pre-partitioned (GPU Operator mig.config or
+#     `nvidia-smi mig -cgi ... -C`); dynamic MIG creation is not shipped in
+#     the NVIDIA driver yet (their issue #361, needs DRAPartitionableDevices)
+#
+#   kubectl apply -f 11-nvidia-mig-modelclaim.yaml
+#   kubectl describe modelclaim qwen-on-mig   # candidates over gpu.nvidia.com
+#                                             # slices, or the derived-bandwidth
+#                                             # shortfall naming the closest
+#                                             # profile
+#
+# NVIDIA publishes no per-profile bandwidth; the bandwidth floor is enforced
+# through llmfit's DERIVED model (board peak x memory-slice fraction). On an
+# A100-80GB fleet, this claim (24Gi + 644 GB/s) admits 3g.40gb and larger and
+# rejects 2g.20gb (derived 510 GB/s) — without naming any profile here.
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: qwen-on-mig
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  minTps: 20
+  deviceClassName: mig.nvidia.com
+  # gpu.nvidia.com instead targets full GPUs; a custom class that selects
+  # NVIDIA-driver devices needs targetDriver: gpu.nvidia.com to opt in.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen-on-mig-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: docker.io/library/busybox:1.36
+      command: ["sh", "-c", "echo '--- nvidia env ---'; env | grep NVIDIA_ || echo '(none)'; sleep 3600"]
+      resources:
+        claims:
+          - name: model
+  resourceClaims:
+    - name: model
+      resourceClaimTemplateName: qwen-on-mig

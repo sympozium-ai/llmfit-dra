@@ -56,6 +56,17 @@ type ModelClaimSpec struct {
 	// +optional
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
+	// TargetDriver selects which DRA driver's devices the emitted fit CEL
+	// reads. Defaults by DeviceClass name: the NVIDIA classes
+	// (gpu.nvidia.com / mig.nvidia.com) imply gpu.nvidia.com; everything else
+	// implies llmfit.ai. Set explicitly only with a custom DeviceClass that
+	// selects NVIDIA-driver devices. On the NVIDIA target, per-MIG-slice
+	// bandwidth is llmfit's DERIVED model (board peak × memory-slice
+	// fraction) — NVIDIA publishes no per-profile bandwidth.
+	// +kubebuilder:validation:Enum=llmfit.ai;gpu.nvidia.com
+	// +optional
+	TargetDriver string `json:"targetDriver,omitempty"`
+
 	// Compute floor in effective dense FP16 TFLOPS, for prefill/TTFT-bound
 	// stages (prefill is compute-bound where decode is bandwidth-bound).
 	// Opt-in: when set, the fit CEL additionally requires

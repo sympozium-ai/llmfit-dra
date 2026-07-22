@@ -95,8 +95,14 @@ func runController(kubeconfig, llmfitBin, metricsAddr string) error {
 		}
 	}()
 
+	boards, err := index.LoadNvidiaBoards()
+	if err != nil {
+		return err
+	}
+	klog.InfoS("nvidia board table loaded", "boards", boards.Len(), "version", boards.Version())
+
 	resolver := &modelclaim.ExecResolver{Bin: llmfitBin}
-	c := modelclaim.New(dyn, client, resolver)
+	c := modelclaim.New(dyn, client, resolver, boards)
 	c.Health = health
 	return c.Run(ctx, 2)
 }

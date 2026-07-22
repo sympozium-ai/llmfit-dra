@@ -9,6 +9,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	apiv1alpha1 "github.com/sympozium-ai/llmfit-dra/api/v1alpha1"
+	"github.com/sympozium-ai/llmfit-dra/internal/index"
 )
 
 const (
@@ -69,10 +70,18 @@ func FitCEL(b *Bounds, deviceClassName string, minComputeTFLOPS int64) string {
 // BuildTemplate renders the desired ResourceClaimTemplate for a ModelClaim:
 // same name/namespace, owned by the claim (GC), one device request whose
 // selectors are the generated fit CEL ANDed with any extraSelectors (DRA
-// ANDs all selectors on a request).
-func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string, extraSelectors []string) *resourceapi.ResourceClaimTemplate {
+// ANDs all selectors on a request). The claim's backend picks the CEL
+// compiler: llmfit.ai classes get FitCEL; the NVIDIA classes (or an explicit
+// targetDriver) get NvidiaFitCEL against gpu.nvidia.com attributes.
+func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string, extraSelectors []string, boards *index.NvidiaBoards) *resourceapi.ResourceClaimTemplate {
+	fit := FitCEL(b, deviceClassName, computeFloor(mc))
+	targetDriver := DriverDomain
+	if backendFor(deviceClassName, mc.Spec.TargetDriver) == backendNvidia {
+		fit = NvidiaFitCEL(b, boards, deviceClassName, computeFloor(mc))
+		targetDriver = NvidiaDriverDomain
+	}
 	selectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{Expression: FitCEL(b, deviceClassName, computeFloor(mc))},
+		CEL: &resourceapi.CELDeviceSelector{Expression: fit},
 	}}
 	for _, cel := range extraSelectors {
 		if s := strings.TrimSpace(cel); s != "" {
@@ -86,11 +95,7 @@ func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string
 			Name:      mc.Name,
 			Namespace: mc.Namespace,
 			Labels:    map[string]string{ManagedByLabel: labelValue(mc.Name)},
-			Annotations: map[string]string{
-				"llmfit.ai/model":            b.Model,
-				"llmfit.ai/quant":            b.Quant,
-				"llmfit.ai/resolver-version": b.ResolverVersion,
-			},
+			Annotations: templateAnnotations(b, targetDriver, boards),
 			// APIVersion/Kind from package constants, not mc.TypeMeta — typed
 			// objects legitimately carry an empty TypeMeta.
 			OwnerReferences: []metav1.OwnerReference{{
@@ -116,6 +121,24 @@ func BuildTemplate(mc *apiv1alpha1.ModelClaim, b *Bounds, deviceClassName string
 			},
 		},
 	}
+}
+
+// templateAnnotations renders the managed annotations. TemplateNeedsUpdate
+// diffs annotations, so anything that changes the generated CEL without
+// changing the spec tuple must appear here: the target driver, and — on the
+// NVIDIA backend — the board-table content hash, so shipping revised board
+// data re-renders every NVIDIA-target template.
+func templateAnnotations(b *Bounds, targetDriver string, boards *index.NvidiaBoards) map[string]string {
+	a := map[string]string{
+		"llmfit.ai/model":            b.Model,
+		"llmfit.ai/quant":            b.Quant,
+		"llmfit.ai/resolver-version": b.ResolverVersion,
+		"llmfit.ai/target-driver":    targetDriver,
+	}
+	if targetDriver == NvidiaDriverDomain && boards != nil {
+		a["llmfit.ai/nvidia-boards-version"] = boards.Version()
+	}
+	return a
 }
 
 // computeFloor reads the opt-in compute floor from the claim spec (0 = unset).
