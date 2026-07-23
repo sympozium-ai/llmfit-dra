@@ -1,0 +1,48 @@
+# NVIDIA fitness-companion: opt in to a vendorManaged GPU for fit checks.
+#
+# On nodes whose GPUs run the `nvidia` kernel driver, llmfit-dra marks the
+# devices `vendorManaged` — the kubelet plugin can inject the DRM render
+# node but not the /dev/nvidia* CUDA stack, and a default-class claim must
+# never allocate a device the driver can't make usable. The shipped classes
+# therefore exclude them, and an unsatisfiable ModelClaim tells you so:
+#
+#   gpu-... (Tesla T4, 16Gi) excluded: vendorManaged — this class only
+#   allocates devices llmfit-dra can prepare; install the vendor's DRA
+#   driver or opt in via a custom DeviceClass
+#
+# This example is that custom DeviceClass: it selects healthy llmfit GPUs
+# *including* vendorManaged ones, so ModelClaims can answer "would this
+# model fit on this silicon?" — inventory + physics, no preparation.
+#
+#   kubectl apply -f 11-nvidia-fitness-companion.yaml
+#   kubectl get modelclaim fit-check-7b     # SATISFIABLE True, DEVICES 1
+#   kubectl describe modelclaim fit-check-7b
+#   kubectl delete -f 11-nvidia-fitness-companion.yaml
+#
+# Verified live on a Tesla T4 (kind + DRA 1.34, driver 0.3.2): the claim
+# reports "1 device(s) on 1 node(s) satisfy the bounds".
+#
+# What this does NOT do: make CUDA work in a consuming pod. Preparation of
+# NVIDIA devices belongs to NVIDIA's DRA driver; run it alongside and align
+# the two drivers' devices in one claim via constraints.matchAttribute on
+# `resource.kubernetes.io/pcieRoot` (both publish it for the same silicon).
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu-any.llmfit.ai
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == "llmfit.ai" &&
+          device.attributes["llmfit.ai"].kind == "gpu" &&
+          device.attributes["llmfit.ai"].healthy
+---
+apiVersion: llmfit.ai/v1alpha1
+kind: ModelClaim
+metadata:
+  name: fit-check-7b
+spec:
+  model: Qwen/Qwen2.5-7B
+  minTps: 5
+  deviceClassName: gpu-any.llmfit.ai
