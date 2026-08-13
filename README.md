@@ -247,6 +247,3 @@ make help                   # everything else
 - Releases are cut by release-please from conventional commits: merging the
   release PR tags `vX.Y.Z`, builds the matching image, and publishes the
   chart to `oci://ghcr.io/sympozium-ai/charts/llmfit-dra`.
-
-Design doc: *POC — llmfit as a DRA ResourceSlice Publisher* (Obsidian,
-sympozium vault).
