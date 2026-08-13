@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.3...v0.3.4) (2026-08-13)
+
+
+### Bug Fixes
+
+* **release:** validate release token credentials ([6e1aa52](https://github.com/sympozium-ai/llmfit-dra/commit/6e1aa5221c400f6c0954a456c994c0036403aeef))
+
 ## [0.3.3](https://github.com/sympozium-ai/llmfit-dra/compare/v0.3.2...v0.3.3) (2026-07-22)
 
 
