@@ -19,12 +19,23 @@ jobs:
       # The check lives in the shell because the `secrets` context is not
       # available in `if:` conditions — referencing it there is a workflow
       # validation error.
-      - name: Require RELEASE_TOKEN
+      - name: Validate RELEASE_TOKEN
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           if [ -z "$RELEASE_TOKEN" ]; then
             echo "::error::RELEASE_TOKEN secret is unset — release tags will not trigger the build/chart workflow. Add a PAT with 'contents: write' + 'workflow'." >&2
+            exit 1
+          fi
+
+          # A non-empty secret can still be expired or revoked. Verify it
+          # before release-please emits an opaque "Bad credentials" error.
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $RELEASE_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            https://api.github.com/user)"
+          if [ "$status" != 200 ]; then
+            echo "::error::RELEASE_TOKEN is invalid or expired (GitHub API returned HTTP $status). Replace the repository secret with an active PAT that has 'contents: write', 'pull-requests: write', and 'workflow' permissions." >&2
             exit 1
           fi
       - uses: googleapis/release-please-action@v4
